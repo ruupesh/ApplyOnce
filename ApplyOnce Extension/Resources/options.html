@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>ApplyOnce — Field Editor</title>
 <link rel="stylesheet" href="options.css" />
 </head>
@@ -42,20 +43,22 @@
 
 <main>
   <section id="fieldsSection">
-    <table id="fieldsTable">
-      <thead>
-        <tr>
-          <th class="colKey">Key</th>
-          <th class="colValue">Value</th>
-          <th class="colType">Type</th>
-          <th class="colPath">Path</th>
-          <th class="colAliases">Aliases (comma-separated label variants)</th>
-          <th class="colUpdated">Updated</th>
-          <th class="colDelete"></th>
-        </tr>
-      </thead>
-      <tbody id="fieldsBody"></tbody>
-    </table>
+    <div class="tableWrap">
+      <table id="fieldsTable">
+        <thead>
+          <tr>
+            <th class="colKey">Key</th>
+            <th class="colValue">Value</th>
+            <th class="colType">Type</th>
+            <th class="colPath">Path</th>
+            <th class="colAliases">Aliases (comma-separated label variants)</th>
+            <th class="colUpdated">Updated</th>
+            <th class="colDelete"></th>
+          </tr>
+        </thead>
+        <tbody id="fieldsBody"></tbody>
+      </table>
+    </div>
     <p id="emptyState" class="empty" hidden>
       No fields saved yet. Browse to a job application with the extension
       enabled and start typing — fields save themselves as you go — or add one
@@ -64,18 +67,20 @@
   </section>
 
   <section id="activitySection" hidden>
-    <table id="activityTable">
-      <thead>
-        <tr>
-          <th class="colTime">Time</th>
-          <th class="colEventType">Event</th>
-          <th class="colLabel">Field</th>
-          <th class="colDetail">Detail</th>
-          <th class="colSite">Site</th>
-        </tr>
-      </thead>
-      <tbody id="activityBody"></tbody>
-    </table>
+    <div class="tableWrap">
+      <table id="activityTable">
+        <thead>
+          <tr>
+            <th class="colTime">Time</th>
+            <th class="colEventType">Event</th>
+            <th class="colLabel">Field</th>
+            <th class="colDetail">Detail</th>
+            <th class="colSite">Site</th>
+          </tr>
+        </thead>
+        <tbody id="activityBody"></tbody>
+      </table>
+    </div>
     <p id="activityEmptyState" class="empty" hidden>
       No activity yet. Fill out a job application with the extension enabled
       and it'll show up here as it happens.

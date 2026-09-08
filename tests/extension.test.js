@@ -90,7 +90,9 @@ test("shared Safari and Chromium manifest uses portable settings", () => {
   assert.deepEqual(manifest.content_scripts[0].js, ["storage.js", "content.js"]);
   assert.equal(manifest.content_scripts[0].all_frames, true);
   assert.equal(manifest.options_ui.page, "options.html");
-  assert.equal("open_in_tab" in manifest.options_ui, false);
+  // The full editor is a wide, multi-column table, so it opens as its own
+  // browser tab rather than the cramped fixed-size options popover.
+  assert.equal(manifest.options_ui.open_in_tab, true);
   assert.match(manifest.action.default_icon, /\.png$/);
   assert.equal("browser_specific_settings" in manifest, false);
   assert.equal(manifest.action.default_title, "ApplyOnce");

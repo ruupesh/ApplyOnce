@@ -28,6 +28,7 @@ async function init() {
       switchTab(btn.dataset.tab);
     });
   });
+  switchTab("fields");
 
   // Live dashboard: reflect what the content script is doing on other tabs
   // in real time, without needing to reopen this page.

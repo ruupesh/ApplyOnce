@@ -2,8 +2,14 @@
   box-sizing: border-box;
 }
 
+html {
+  height: 100%;
+}
+
 body {
   margin: 0;
+  min-width: 320px;
+  min-height: 100%;
   font: 14px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
   color: #1f2937;
   background: #f9fafb;
@@ -28,6 +34,12 @@ h1 {
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+/* An attribute selector is needed to beat `.toolbar { display: flex }` — a bare
+   [hidden] loses to it, which left the inactive tab's toolbar on screen. */
+.toolbar[hidden] {
+  display: none;
 }
 
 #search {
@@ -76,13 +88,32 @@ main {
   padding: 20px 24px 60px;
 }
 
+/* Horizontal scroll lives here so a wide, multi-column table never forces the
+   whole page sideways. On phones the table keeps its readable column widths
+   and this container scrolls; on desktop it just fills the width. */
+.tableWrap {
+  width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
   background: #fff;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  overflow: hidden;
+}
+
+#fieldsTable {
+  min-width: 900px;
+}
+
+#activityTable {
+  min-width: 700px;
 }
 
 th {
@@ -107,28 +138,35 @@ tr:last-child td {
 }
 
 .colKey {
-  width: 15%;
+  width: 14%;
+  min-width: 110px;
 }
 .colValue {
-  width: 26%;
+  width: 24%;
+  min-width: 200px;
 }
 .colType {
-  width: 8%;
+  width: 10%;
+  min-width: 104px;
 }
 .colPath {
-  width: 10%;
+  width: 16%;
+  min-width: 150px;
 }
 .colAliases {
-  width: 27%;
+  width: 22%;
+  min-width: 190px;
 }
 .colUpdated {
   width: 10%;
+  min-width: 92px;
   white-space: nowrap;
   color: #6b7280;
   font-size: 12px;
 }
 .colDelete {
   width: 4%;
+  min-width: 74px;
 }
 
 .pathSteps {
@@ -178,6 +216,7 @@ tr:last-child td {
 /* Path column needs room now that it shows real step names */
 .colPath {
   width: 18%;
+  min-width: 150px;
 }
 
 /* ---------- Tabs ---------- */
@@ -212,21 +251,26 @@ tr:last-child td {
 
 .colTime {
   width: 14%;
+  min-width: 96px;
   white-space: nowrap;
   color: #6b7280;
   font-size: 12px;
 }
 .colEventType {
   width: 13%;
+  min-width: 104px;
 }
 .colLabel {
   width: 25%;
+  min-width: 160px;
 }
 .colDetail {
   width: 34%;
+  min-width: 220px;
 }
 .colSite {
   width: 14%;
+  min-width: 120px;
   color: #6b7280;
   font-size: 12px;
 }
@@ -337,4 +381,43 @@ textarea.valueInput {
   color: #6b7280;
   padding: 30px;
   text-align: center;
+}
+
+/* ---------- Large viewports ---------- */
+
+/* Keep the editor readable on a wide monitor instead of stretching columns
+   across the whole screen. */
+@media (min-width: 1200px) {
+  main {
+    max-width: 1180px;
+    margin: 0 auto;
+  }
+}
+
+/* ---------- Phones / narrow windows ---------- */
+
+@media (max-width: 600px) {
+  header {
+    padding: 12px 14px;
+  }
+  main {
+    padding: 14px 14px 44px;
+  }
+  h1 {
+    font-size: 16px;
+  }
+  .toolbar {
+    gap: 8px;
+  }
+  /* Search gets its own full-width row so the action buttons stay tappable. */
+  #search {
+    min-width: 0;
+    flex-basis: 100%;
+  }
+  .toggle {
+    margin-left: 0;
+  }
+  .tabBtn {
+    padding: 6px 10px;
+  }
 }
