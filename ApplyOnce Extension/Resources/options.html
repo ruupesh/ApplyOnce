@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>ApplyOnce — Field Editor</title>
+<link rel="stylesheet" href="options.css" />
+</head>
+<body>
+<header>
+  <h1>ApplyOnce</h1>
+  <nav class="tabs">
+    <button class="tabBtn active" data-tab="fields">Fields</button>
+    <button class="tabBtn" data-tab="activity">Activity Log</button>
+  </nav>
+  <div class="toolbar" id="fieldsToolbar">
+    <input id="search" type="search" aria-label="Search fields" placeholder="Search fields..." />
+    <button id="addFieldBtn">+ Add Field</button>
+    <label class="fileBtn">
+      Add Resume
+      <input
+        id="resumeInput"
+        type="file"
+        accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        hidden
+      />
+    </label>
+    <button id="exportBtn" class="secondary">Export JSON</button>
+    <label class="fileBtn">
+      Import JSON
+      <input id="importInput" type="file" accept="application/json" hidden />
+    </label>
+    <label class="toggle">
+      <input type="checkbox" id="enabledToggle" />
+      Extension enabled
+    </label>
+  </div>
+  <div class="toolbar" id="activityToolbar" hidden>
+    <span class="activityHint">What the extension has filled, saved, and recorded — newest first.</span>
+    <button id="clearLogBtn" class="secondary">Clear Log</button>
+  </div>
+</header>
+
+<main>
+  <section id="fieldsSection">
+    <table id="fieldsTable">
+      <thead>
+        <tr>
+          <th class="colKey">Key</th>
+          <th class="colValue">Value</th>
+          <th class="colType">Type</th>
+          <th class="colPath">Path</th>
+          <th class="colAliases">Aliases (comma-separated label variants)</th>
+          <th class="colUpdated">Updated</th>
+          <th class="colDelete"></th>
+        </tr>
+      </thead>
+      <tbody id="fieldsBody"></tbody>
+    </table>
+    <p id="emptyState" class="empty" hidden>
+      No fields saved yet. Browse to a job application with the extension
+      enabled and start typing — fields save themselves as you go — or add one
+      manually above.
+    </p>
+  </section>
+
+  <section id="activitySection" hidden>
+    <table id="activityTable">
+      <thead>
+        <tr>
+          <th class="colTime">Time</th>
+          <th class="colEventType">Event</th>
+          <th class="colLabel">Field</th>
+          <th class="colDetail">Detail</th>
+          <th class="colSite">Site</th>
+        </tr>
+      </thead>
+      <tbody id="activityBody"></tbody>
+    </table>
+    <p id="activityEmptyState" class="empty" hidden>
+      No activity yet. Fill out a job application with the extension enabled
+      and it'll show up here as it happens.
+    </p>
+  </section>
+</main>
+
+<script src="storage.js"></script>
+<script src="options.js"></script>
+</body>
+</html>

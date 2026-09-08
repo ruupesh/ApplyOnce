@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>ApplyOnce</title>
+<link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="wrap">
+    <h1>ApplyOnce</h1>
+
+    <label class="toggle">
+      <input type="checkbox" id="enabledToggle" />
+      <span>Extension enabled</span>
+    </label>
+
+    <div class="summary">
+      <div class="row">
+        <span>Saved fields (total)</span>
+        <strong id="totalFields">-</strong>
+      </div>
+      <div class="row">
+        <span>Fields on this page</span>
+        <strong id="pageTotal">-</strong>
+      </div>
+      <div class="row good">
+        <span>Matched</span>
+        <strong id="pageMatched">-</strong>
+      </div>
+      <div class="row warn">
+        <span>Unmapped</span>
+        <strong id="pageUnmapped">-</strong>
+      </div>
+    </div>
+
+    <div id="unmappedSection" hidden>
+      <div class="unmappedHeader">Unmapped fields on this page</div>
+      <ul id="unmappedList" class="unmappedList"></ul>
+      <p class="hint">
+        Type into one of these on the page and it'll be saved as a new field
+        automatically.
+      </p>
+    </div>
+
+    <div class="actions">
+      <button id="rescanBtn">Rescan &amp; Autofill This Page</button>
+      <button id="openEditorBtn" class="secondary">Open Full Editor</button>
+    </div>
+
+    <p class="hint">
+      Fields you type into are saved automatically — corrections to matched
+      fields update the saved value, and fields with no match yet become new
+      profile entries. Open the full editor to review, rename, or edit
+      anything.
+    </p>
+    <p class="hint muted">
+      Password and payment/ID fields are never read or saved.
+    </p>
+  </div>
+  <script src="storage.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

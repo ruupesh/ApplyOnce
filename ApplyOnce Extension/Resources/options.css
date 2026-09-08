@@ -1,0 +1,340 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font: 14px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: #1f2937;
+  background: #f9fafb;
+}
+
+header {
+  background: #fff;
+  border-bottom: 1px solid #e5e7eb;
+  padding: 16px 24px;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+h1 {
+  font-size: 18px;
+  margin: 0 0 12px;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+#search {
+  flex: 1;
+  min-width: 200px;
+  font: inherit;
+  padding: 7px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+}
+
+button,
+.fileBtn {
+  font: inherit;
+  padding: 7px 12px;
+  border-radius: 6px;
+  border: 1px solid #1f2937;
+  background: #1f2937;
+  color: #fff;
+  cursor: pointer;
+  display: inline-block;
+}
+
+button:hover,
+.fileBtn:hover {
+  opacity: 0.9;
+}
+
+button.secondary {
+  background: #fff;
+  color: #1f2937;
+  border-color: #d1d5db;
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  cursor: pointer;
+  user-select: none;
+  color: #374151;
+}
+
+main {
+  padding: 20px 24px 60px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+th {
+  text-align: left;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #6b7280;
+  background: #f3f4f6;
+  padding: 10px 12px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+td {
+  padding: 8px 10px;
+  border-bottom: 1px solid #f3f4f6;
+  vertical-align: top;
+}
+
+tr:last-child td {
+  border-bottom: none;
+}
+
+.colKey {
+  width: 15%;
+}
+.colValue {
+  width: 26%;
+}
+.colType {
+  width: 8%;
+}
+.colPath {
+  width: 10%;
+}
+.colAliases {
+  width: 27%;
+}
+.colUpdated {
+  width: 10%;
+  white-space: nowrap;
+  color: #6b7280;
+  font-size: 12px;
+}
+.colDelete {
+  width: 4%;
+}
+
+.pathSteps {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px;
+}
+
+.pathStep {
+  display: inline-block;
+  font-size: 11px;
+  color: #4338ca;
+  background: #eef2ff;
+  border: 1px solid #c7d2fe;
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
+.pathStep.final {
+  color: #15803d;
+  background: #dcfce7;
+  border-color: #bbf7d0;
+  font-weight: 600;
+}
+
+.pathArrow {
+  color: #9ca3af;
+  font-size: 11px;
+}
+
+.clearPathBtn {
+  font-size: 10.5px;
+  padding: 1px 6px;
+  background: #fff;
+  color: #6b7280;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  margin-left: 2px;
+}
+
+.noPath {
+  color: #9ca3af;
+  font-size: 11.5px;
+}
+
+/* Path column needs room now that it shows real step names */
+.colPath {
+  width: 18%;
+}
+
+/* ---------- Tabs ---------- */
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.tabBtn {
+  background: #fff;
+  color: #6b7280;
+  border: 1px solid transparent;
+  border-radius: 6px 6px 0 0;
+  padding: 6px 14px;
+}
+
+.tabBtn.active {
+  color: #1f2937;
+  background: #f3f4f6;
+  border-color: #e5e7eb;
+  font-weight: 600;
+}
+
+.activityHint {
+  color: #6b7280;
+  font-size: 12.5px;
+}
+
+/* ---------- Activity log ---------- */
+
+.colTime {
+  width: 14%;
+  white-space: nowrap;
+  color: #6b7280;
+  font-size: 12px;
+}
+.colEventType {
+  width: 13%;
+}
+.colLabel {
+  width: 25%;
+}
+.colDetail {
+  width: 34%;
+}
+.colSite {
+  width: 14%;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.eventBadge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 4px;
+  padding: 2px 7px;
+  white-space: nowrap;
+}
+
+.eventBadge.filled {
+  background: #dcfce7;
+  color: #15803d;
+}
+.eventBadge.saved {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+.eventBadge.recorded {
+  background: #eef2ff;
+  color: #4338ca;
+}
+.eventBadge.replay-attempt {
+  background: #fef9c3;
+  color: #854d0e;
+}
+.eventBadge.replay-success {
+  background: #dcfce7;
+  color: #15803d;
+}
+.eventBadge.replay-fail {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+.eventBadge.file-saved {
+  background: #e0f2fe;
+  color: #0369a1;
+}
+.eventBadge.file-fail {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+.eventBadge.oracle-fail {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+input.keyInput,
+input.aliasInput,
+textarea.valueInput,
+select.typeSelect {
+  width: 100%;
+  font: inherit;
+  padding: 6px 8px;
+  border: 1px solid #e5e7eb;
+  border-radius: 5px;
+  background: #fff;
+}
+
+textarea.valueInput {
+  resize: vertical;
+  min-height: 34px;
+}
+
+.fileValueEditor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.filePickerBtn {
+  grid-column: 1 / -1;
+  width: fit-content;
+  padding: 5px 9px;
+  color: #1f2937;
+  background: #fff;
+  border-color: #d1d5db;
+}
+
+.storedFileName {
+  overflow: hidden;
+  color: #374151;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.removeFileBtn {
+  padding: 3px 7px;
+  color: #b91c1c;
+  background: #fff;
+  border-color: #fecaca;
+  font-size: 11px;
+}
+
+.deleteBtn {
+  background: #fff;
+  color: #dc2626;
+  border-color: #fecaca;
+  padding: 6px 10px;
+}
+
+.empty {
+  color: #6b7280;
+  padding: 30px;
+  text-align: center;
+}

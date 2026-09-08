@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "enabled": true,
+  "fields": {
+    "first_name": {
+      "value": "Example",
+      "aliases": ["First Name", "Given Name"],
+      "type": "text",
+      "createdAt": 1767225600000,
+      "updatedAt": 1767225600000
+    },
+    "last_name": {
+      "value": "Applicant",
+      "aliases": ["Last Name", "Family Name", "Surname"],
+      "type": "text",
+      "createdAt": 1767225600000,
+      "updatedAt": 1767225600000
+    },
+    "email": {
+      "value": "applicant@example.com",
+      "aliases": ["Email", "Email Address"],
+      "type": "text",
+      "createdAt": 1767225600000,
+      "updatedAt": 1767225600000
+    },
+    "portfolio": {
+      "value": "https://example.com/portfolio",
+      "aliases": ["Portfolio", "Website", "Personal Website"],
+      "type": "text",
+      "createdAt": 1767225600000,
+      "updatedAt": 1767225600000
+    }
+  },
+  "activityLog": []
+}

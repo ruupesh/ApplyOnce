@@ -1,0 +1,17 @@
+# macOS
+.DS_Store
+
+# Xcode user data and build products
+DerivedData/
+build/
+dist/
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+*.xcscmblueprint
+
+# JavaScript test tooling
+node_modules/
+
+# Private local profiles and resumes
+LocalData/
