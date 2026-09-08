@@ -18,7 +18,8 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
   var PLACEHOLDER_TEXT_RE = /^(select one|select\.\.\.|select an? option|choose one|choose\.\.\.|please select|search|\d+\s*items?\s*selected|0\s*items?\s*selected)$/i;
 
   var state = null;
-  var enabled = true;
+  var enabled = true; // "is ApplyOnce allowed to act on this host right now?"
+  var scanningStarted = false;
   var scanTimer = null;
   var badgeEl = null;
   var badgeTimer = null;
@@ -31,32 +32,49 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
 
   async function init() {
     state = await getState();
-    enabled = state.enabled !== false;
+    enabled = jaaShouldRunOnHost(state, location.hostname);
 
-    scheduleScan(300);
-
-    var observer = new MutationObserver(function () {
-      scheduleScan(600);
-    });
-    observer.observe(document.documentElement, { childList: true, subtree: true });
+    if (enabled) startScanning();
 
     jaaBrowser.storage.onChanged.addListener(function (changes, area) {
       if (area === "local" && changes[JAA_STORAGE_KEY]) {
+        var wasEnabled = enabled;
         state = changes[JAA_STORAGE_KEY].newValue || jaaDefaultState();
-        enabled = state.enabled !== false;
+        enabled = jaaShouldRunOnHost(state, location.hostname);
+        // Site was just allowed (blocklist edit, mode switch, master toggle) —
+        // start filling now instead of waiting for the next page load.
+        if (enabled && !wasEnabled) {
+          startScanning();
+          scanAndFill(true);
+        }
       }
     });
 
     jaaBrowser.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       if (!msg) return false;
       if (msg.type === "JAA_RESCAN") {
-        scanAndFill(true);
-        sendResponse({ ok: true });
+        if (enabled) {
+          startScanning();
+          scanAndFill(true);
+        }
+        sendResponse({ ok: enabled });
       } else if (msg.type === "JAA_GET_PAGE_SUMMARY") {
         sendResponse(getPageSummary());
       }
       return false; // always responded synchronously above
     });
+  }
+
+  // Kick off the first scan and watch the page for later changes. Held back
+  // until the site is actually allowed, so blocked sites do no work at all.
+  function startScanning() {
+    if (scanningStarted) return;
+    scanningStarted = true;
+    scheduleScan(300);
+    var observer = new MutationObserver(function () {
+      scheduleScan(600);
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
   }
 
   function scheduleScan(delay) {

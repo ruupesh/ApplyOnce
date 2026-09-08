@@ -383,6 +383,132 @@ textarea.valueInput {
   text-align: center;
 }
 
+/* ---------- Sites tab ---------- */
+
+.sitesPanel {
+  max-width: 640px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.siteModeGroup {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fff;
+  padding: 12px 14px;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.siteModeGroup legend {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #6b7280;
+  padding: 0 4px;
+}
+
+.siteModeGroup label {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  cursor: pointer;
+}
+
+.siteModeGroup input[type="radio"] {
+  margin-top: 3px;
+}
+
+.siteModeGroup span {
+  display: flex;
+  flex-direction: column;
+}
+
+.siteModeGroup small {
+  color: #6b7280;
+}
+
+.siteListBlock {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fff;
+  padding: 12px 14px;
+}
+
+.siteListBlock.inactive {
+  opacity: 0.55;
+}
+
+.siteListBlock h2 {
+  font-size: 14px;
+  margin: 0 0 2px;
+}
+
+.siteListNote {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.siteAddRow {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.siteAddRow input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  padding: 7px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+}
+
+.siteList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.siteList li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 10px;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+}
+
+.siteList .siteName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.siteList .siteRemove {
+  flex: none;
+  padding: 3px 9px;
+  font-size: 12px;
+  color: #b91c1c;
+  background: #fff;
+  border-color: #fecaca;
+}
+
+.siteListEmpty {
+  margin: 0;
+  font-size: 12px;
+  color: #9ca3af;
+}
+
 /* ---------- Large viewports ---------- */
 
 /* Keep the editor readable on a wide monitor instead of stretching columns

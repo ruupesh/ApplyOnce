@@ -23,6 +23,12 @@ function jaaDefaultState() {
   return {
     version: 1,
     enabled: true,
+    // Which sites the extension runs on:
+    //   "all"       -> every site, except the ones in blockedSites
+    //   "allowlist" -> only the sites in allowedSites
+    siteMode: "all",
+    allowedSites: [],
+    blockedSites: [],
     fields: {},
     // fields[key] = { value, aliases: [...], type, createdAt, updatedAt, recordedPath?: [...] }
     // File bytes are stored separately under JAA_FILE_STORAGE_PREFIX + encoded field key.
@@ -38,9 +44,53 @@ async function getState() {
   var state = res && res[JAA_STORAGE_KEY];
   if (state && typeof state === "object" && state.fields) {
     if (!state.activityLog) state.activityLog = []; // backfill for profiles saved before this existed
+    if (state.siteMode !== "allowlist") state.siteMode = "all";
+    if (!Array.isArray(state.allowedSites)) state.allowedSites = [];
+    if (!Array.isArray(state.blockedSites)) state.blockedSites = [];
     return state;
   }
   return jaaDefaultState();
+}
+
+// ---------- Per-site on/off ----------
+
+// Turn any hostname or pasted URL into a bare, comparable host:
+// "https://www.Boards.Greenhouse.io/acme" -> "boards.greenhouse.io".
+function jaaNormalizeHost(value) {
+  var text = String(value == null ? "" : value).trim().toLowerCase();
+  if (!text) return "";
+  if (text.indexOf("//") !== -1) text = text.split("//")[1] || "";
+  text = text.split("/")[0];
+  text = text.split("@").pop();
+  text = text.split("?")[0].split("#")[0];
+  text = text.replace(/:\d+$/, "");
+  text = text.replace(/^\.+/, "").replace(/\.+$/, "");
+  if (text.indexOf("www.") === 0) text = text.slice(4);
+  return text;
+}
+
+function jaaHostFromUrl(url) {
+  return jaaNormalizeHost(url);
+}
+
+// True when `host` is a list entry or a subdomain of one, so adding
+// "greenhouse.io" also covers "boards.greenhouse.io".
+function jaaHostInList(host, list) {
+  var h = jaaNormalizeHost(host);
+  if (!h || !Array.isArray(list)) return false;
+  return list.some(function (entry) {
+    var e = jaaNormalizeHost(entry);
+    return !!e && (h === e || h.slice(-(e.length + 1)) === "." + e);
+  });
+}
+
+// The single question every context asks: should ApplyOnce act on this host?
+function jaaShouldRunOnHost(state, host) {
+  if (!state || state.enabled === false) return false;
+  var h = jaaNormalizeHost(host);
+  if (!h) return false;
+  if (state.siteMode === "allowlist") return jaaHostInList(h, state.allowedSites);
+  return !jaaHostInList(h, state.blockedSites);
 }
 
 async function setState(state) {
@@ -179,6 +229,10 @@ if (typeof window !== "undefined") {
   window.uniqueKey = uniqueKey;
   window.findMatchingKey = findMatchingKey;
   window.jaaDefaultState = jaaDefaultState;
+  window.jaaNormalizeHost = jaaNormalizeHost;
+  window.jaaHostFromUrl = jaaHostFromUrl;
+  window.jaaHostInList = jaaHostInList;
+  window.jaaShouldRunOnHost = jaaShouldRunOnHost;
   window.getStoredFile = getStoredFile;
   window.setStoredFile = setStoredFile;
   window.removeStoredFile = removeStoredFile;

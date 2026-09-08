@@ -33,6 +33,84 @@ h1 {
   height: 16px;
 }
 
+.siteCard {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 12px;
+}
+
+.siteCardTop {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.siteHost {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.siteStatus {
+  flex: none;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.siteStatus.on {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.siteStatus.off {
+  background: #f3f4f6;
+  color: #6b7280;
+}
+
+.siteBtns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0 0;
+}
+
+.siteBtns:empty {
+  display: none;
+}
+
+.siteBtns button {
+  flex: 1;
+  padding: 7px 8px;
+  font-size: 12px;
+}
+
+.siteMode {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  color: #374151;
+}
+
+.siteMode select {
+  flex: 1;
+  font: inherit;
+  padding: 5px 6px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #fff;
+  color: inherit;
+}
+
+.siteCard .hint {
+  margin-top: 8px;
+}
+
 .summary {
   border: 1px solid #e5e7eb;
   border-radius: 8px;

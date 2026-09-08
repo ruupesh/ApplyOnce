@@ -12,6 +12,7 @@
   <nav class="tabs">
     <button class="tabBtn active" data-tab="fields">Fields</button>
     <button class="tabBtn" data-tab="activity">Activity Log</button>
+    <button class="tabBtn" data-tab="sites">Sites</button>
   </nav>
   <div class="toolbar" id="fieldsToolbar">
     <input id="search" type="search" aria-label="Search fields" placeholder="Search fields..." />
@@ -38,6 +39,9 @@
   <div class="toolbar" id="activityToolbar" hidden>
     <span class="activityHint">What the extension has filled, saved, and recorded — newest first.</span>
     <button id="clearLogBtn" class="secondary">Clear Log</button>
+  </div>
+  <div class="toolbar" id="sitesToolbar" hidden>
+    <span class="activityHint">Choose where ApplyOnce is allowed to fill forms.</span>
   </div>
 </header>
 
@@ -85,6 +89,62 @@
       No activity yet. Fill out a job application with the extension enabled
       and it'll show up here as it happens.
     </p>
+  </section>
+
+  <section id="sitesSection" hidden>
+    <div class="sitesPanel">
+      <fieldset class="siteModeGroup">
+        <legend>Where ApplyOnce runs</legend>
+        <label>
+          <input type="radio" name="siteMode" value="all" />
+          <span>
+            <strong>All websites</strong>
+            <small>Fills forms everywhere, except sites on your blocked list.</small>
+          </span>
+        </label>
+        <label>
+          <input type="radio" name="siteMode" value="allowlist" />
+          <span>
+            <strong>Only websites I pick</strong>
+            <small>Stays off everywhere except sites on your allowed list.</small>
+          </span>
+        </label>
+      </fieldset>
+
+      <div class="siteListBlock" id="allowedBlock">
+        <h2>Allowed websites</h2>
+        <p class="siteListNote">Used when "Only websites I pick" is selected.</p>
+        <form class="siteAddRow" id="allowedAddForm">
+          <input
+            type="text"
+            id="allowedInput"
+            placeholder="example.com"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <button type="submit">Add</button>
+        </form>
+        <ul class="siteList" id="allowedList"></ul>
+        <p class="siteListEmpty" id="allowedEmpty" hidden>No websites added yet.</p>
+      </div>
+
+      <div class="siteListBlock" id="blockedBlock">
+        <h2>Blocked websites</h2>
+        <p class="siteListNote">Used when "All websites" is selected.</p>
+        <form class="siteAddRow" id="blockedAddForm">
+          <input
+            type="text"
+            id="blockedInput"
+            placeholder="example.com"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <button type="submit">Add</button>
+        </form>
+        <ul class="siteList" id="blockedList"></ul>
+        <p class="siteListEmpty" id="blockedEmpty" hidden>No websites added yet.</p>
+      </div>
+    </div>
   </section>
 </main>
 

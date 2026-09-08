@@ -168,6 +168,44 @@ test("shared storage falls back to Chrome's chrome namespace", async () => {
   assert.deepEqual(Array.from(state.activityLog), []);
 });
 
+test("getState backfills the per-site policy for older profiles", async () => {
+  const { context } = loadStorage("browser", {
+    jaaState: { version: 1, enabled: true, fields: {}, activityLog: [] }
+  });
+
+  const state = await context.getState();
+  assert.equal(state.siteMode, "all");
+  assert.deepEqual(Array.from(state.allowedSites), []);
+  assert.deepEqual(Array.from(state.blockedSites), []);
+
+  const defaults = context.jaaDefaultState();
+  assert.equal(defaults.siteMode, "all");
+  assert.deepEqual(Array.from(defaults.allowedSites), []);
+  assert.deepEqual(Array.from(defaults.blockedSites), []);
+});
+
+test("per-site policy decides where the extension runs", () => {
+  const { context } = loadStorage("browser");
+  const run = (state, host) => context.jaaShouldRunOnHost(state, host);
+
+  assert.equal(context.jaaNormalizeHost("https://www.Boards.Greenhouse.io/acme"), "boards.greenhouse.io");
+  assert.equal(context.jaaHostFromUrl("http://jobs.example:8443/apply?x=1"), "jobs.example");
+
+  // "all" mode: everywhere, minus the blocked list (subdomains included).
+  const all = { enabled: true, siteMode: "all", allowedSites: [], blockedSites: ["greenhouse.io"] };
+  assert.equal(run(all, "lever.co"), true);
+  assert.equal(run(all, "greenhouse.io"), false);
+  assert.equal(run(all, "boards.greenhouse.io"), false);
+
+  // "allowlist" mode: only the allowed list.
+  const only = { enabled: true, siteMode: "allowlist", allowedSites: ["myworkdayjobs.com"], blockedSites: [] };
+  assert.equal(run(only, "lever.co"), false);
+  assert.equal(run(only, "acme.myworkdayjobs.com"), true);
+
+  // The master switch still wins over any site rule.
+  assert.equal(run({ enabled: false, siteMode: "all", blockedSites: [] }, "lever.co"), false);
+});
+
 test("service worker initializes through browser and chrome namespaces", async (t) => {
   for (const namespace of ["browser", "chrome"]) {
     await t.test(namespace, async () => {
@@ -212,9 +250,16 @@ test("popup messaging and Safari editor fallback use Promise APIs", async () => 
       checked: false,
       children: [],
       hidden: false,
-      innerHTML: "",
       listeners: {},
       textContent: "",
+      _innerHTML: "",
+      get innerHTML() {
+        return this._innerHTML;
+      },
+      set innerHTML(value) {
+        this._innerHTML = value;
+        if (value === "") this.children = [];
+      },
       addEventListener(type, listener) {
         this.listeners[type] = listener;
       },
@@ -233,7 +278,12 @@ test("popup messaging and Safari editor fallback use Promise APIs", async () => 
     "unmappedSection",
     "unmappedList",
     "rescanBtn",
-    "openEditorBtn"
+    "openEditorBtn",
+    "siteHost",
+    "siteStatus",
+    "siteBtns",
+    "siteModeSelect",
+    "siteHint"
   ];
   const elements = Object.fromEntries(ids.map((id) => [id, fakeElement()]));
   const messages = [];
@@ -263,8 +313,11 @@ test("popup messaging and Safari editor fallback use Promise APIs", async () => 
       }
     }
   };
+  const storageModule = loadStorage("browser").context;
+  let savedState = null;
   const context = vm.createContext({
     console,
+    URL,
     document: {
       createElement: fakeElement,
       getElementById(id) {
@@ -273,10 +326,19 @@ test("popup messaging and Safari editor fallback use Promise APIs", async () => 
     },
     getState: async () => ({
       enabled: true,
+      siteMode: "all",
+      allowedSites: [],
+      blockedSites: [],
       fields: { email: {}, name: {} }
     }),
     jaaBrowser: api,
-    setState: async () => {}
+    setState: async (next) => {
+      savedState = next;
+    },
+    jaaNormalizeHost: storageModule.jaaNormalizeHost,
+    jaaHostFromUrl: storageModule.jaaHostFromUrl,
+    jaaHostInList: storageModule.jaaHostInList,
+    jaaShouldRunOnHost: storageModule.jaaShouldRunOnHost
   });
 
   vm.runInContext(fs.readFileSync(path.join(resourcesRoot, "popup.js"), "utf8"), context, {
@@ -289,6 +351,17 @@ test("popup messaging and Safari editor fallback use Promise APIs", async () => 
   assert.equal(elements.pageMatched.textContent, 2);
   assert.equal(elements.pageUnmapped.textContent, 1);
   assert.equal(elements.unmappedList.children[0].textContent, "Portfolio");
+
+  // Per-site card reflects the active tab and offers a one-click block.
+  assert.equal(elements.siteHost.textContent, "jobs.example");
+  assert.equal(elements.siteStatus.textContent, "On");
+  assert.equal(elements.siteModeSelect.value, "all");
+  assert.equal(elements.siteBtns.children[0].textContent, "Block this site");
+
+  await elements.siteBtns.children[0].listeners.click();
+  assert.ok(savedState.blockedSites.includes("jobs.example"));
+  assert.equal(elements.siteStatus.textContent, "Off");
+  assert.equal(elements.siteBtns.children[0].textContent, "Unblock this site");
 
   await elements.rescanBtn.listeners.click();
   assert.ok(messages.some(({ message }) => message.type === "JAA_RESCAN"));

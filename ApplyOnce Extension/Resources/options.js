@@ -30,6 +30,15 @@ async function init() {
   });
   switchTab("fields");
 
+  Array.prototype.forEach.call(
+    document.querySelectorAll('input[name="siteMode"]'),
+    function (radio) {
+      radio.addEventListener("change", onSiteModeChange);
+    }
+  );
+  wireSiteAddForm("allowedAddForm", "allowedInput", "allowedSites");
+  wireSiteAddForm("blockedAddForm", "blockedInput", "blockedSites");
+
   // Live dashboard: reflect what the content script is doing on other tabs
   // in real time, without needing to reopen this page.
   jaaBrowser.storage.onChanged.addListener(function (changes, area) {
@@ -37,10 +46,12 @@ async function init() {
     state = changes[JAA_STORAGE_KEY].newValue || jaaDefaultState();
     renderFields();
     renderActivity();
+    renderSites();
   });
 
   renderFields();
   renderActivity();
+  renderSites();
 }
 
 function switchTab(tab) {
@@ -49,8 +60,84 @@ function switchTab(tab) {
   });
   document.getElementById("fieldsSection").hidden = tab !== "fields";
   document.getElementById("activitySection").hidden = tab !== "activity";
+  document.getElementById("sitesSection").hidden = tab !== "sites";
   document.getElementById("fieldsToolbar").hidden = tab !== "fields";
   document.getElementById("activityToolbar").hidden = tab !== "activity";
+  document.getElementById("sitesToolbar").hidden = tab !== "sites";
+}
+
+// ---------- Sites tab ----------
+
+function renderSites() {
+  var mode = state.siteMode === "allowlist" ? "allowlist" : "all";
+  Array.prototype.forEach.call(
+    document.querySelectorAll('input[name="siteMode"]'),
+    function (radio) {
+      radio.checked = radio.value === mode;
+    }
+  );
+
+  document.getElementById("allowedBlock").classList.toggle("inactive", mode !== "allowlist");
+  document.getElementById("blockedBlock").classList.toggle("inactive", mode !== "all");
+
+  renderSiteList("allowedList", "allowedEmpty", "allowedSites");
+  renderSiteList("blockedList", "blockedEmpty", "blockedSites");
+}
+
+function renderSiteList(listId, emptyId, key) {
+  var ul = document.getElementById(listId);
+  var hosts = Array.isArray(state[key]) ? state[key].slice().sort() : [];
+  ul.innerHTML = "";
+  document.getElementById(emptyId).hidden = hosts.length !== 0;
+
+  hosts.forEach(function (host) {
+    var li = document.createElement("li");
+
+    var name = document.createElement("span");
+    name.className = "siteName";
+    name.textContent = host;
+    li.appendChild(name);
+
+    var remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "siteRemove";
+    remove.textContent = "Remove";
+    remove.addEventListener("click", function () {
+      updateSiteList(key, host, false);
+    });
+    li.appendChild(remove);
+
+    ul.appendChild(li);
+  });
+}
+
+function wireSiteAddForm(formId, inputId, key) {
+  var form = document.getElementById(formId);
+  var input = document.getElementById(inputId);
+  form.addEventListener("submit", function (event) {
+    event.preventDefault();
+    updateSiteList(key, input.value, true);
+    input.value = "";
+    input.focus();
+  });
+}
+
+async function updateSiteList(key, host, add) {
+  var h = jaaNormalizeHost(host);
+  if (!h) return;
+  var list = (Array.isArray(state[key]) ? state[key] : []).filter(function (entry) {
+    return jaaNormalizeHost(entry) !== h;
+  });
+  if (add) list.push(h);
+  state[key] = list;
+  await setState(state);
+  renderSites();
+}
+
+async function onSiteModeChange(event) {
+  state.siteMode = event.target.value === "allowlist" ? "allowlist" : "all";
+  await setState(state);
+  renderSites();
 }
 
 // ---------- Fields tab ----------
@@ -457,11 +544,15 @@ async function importJSON(e) {
     state = parsed;
     if (typeof state.enabled === "undefined") state.enabled = true;
     if (!state.activityLog) state.activityLog = [];
+    if (state.siteMode !== "allowlist") state.siteMode = "all";
+    if (!Array.isArray(state.allowedSites)) state.allowedSites = [];
+    if (!Array.isArray(state.blockedSites)) state.blockedSites = [];
   }
   await setState(state);
   enabledToggle.checked = state.enabled !== false;
   renderFields();
   renderActivity();
+  renderSites();
   e.target.value = "";
 }
 
