@@ -10,70 +10,135 @@
   <div class="wrap">
     <h1>ApplyOnce</h1>
 
-    <label class="toggle">
-      <input type="checkbox" id="enabledToggle" />
-      <span>Extension enabled</span>
-    </label>
-
-    <div class="siteCard" id="siteCard">
-      <div class="siteCardTop">
-        <span class="siteHost" id="siteHost">this site</span>
-        <span class="siteStatus" id="siteStatus"></span>
-      </div>
-      <div class="siteBtns" id="siteBtns"></div>
-      <label class="siteMode">
-        <span>Run on</span>
-        <select id="siteModeSelect">
-          <option value="all">All sites</option>
-          <option value="allowlist">Only sites I pick</option>
-        </select>
+    <div id="mainView">
+      <label class="toggle">
+        <input type="checkbox" id="enabledToggle" />
+        <span>Extension enabled</span>
       </label>
-      <p class="hint" id="siteHint"></p>
-    </div>
 
-    <div class="summary">
-      <div class="row">
-        <span>Saved fields (total)</span>
-        <strong id="totalFields">-</strong>
+      <div class="siteCard" id="siteCard">
+        <div class="siteCardTop">
+          <span class="siteHost" id="siteHost">this site</span>
+          <span class="siteStatus" id="siteStatus"></span>
+        </div>
+        <div class="siteBtns" id="siteBtns"></div>
+        <label class="siteMode">
+          <span>Run on</span>
+          <select id="siteModeSelect">
+            <option value="all">All sites</option>
+            <option value="allowlist">Only sites I pick</option>
+          </select>
+        </label>
+        <p class="hint" id="siteHint"></p>
       </div>
-      <div class="row">
-        <span>Fields on this page</span>
-        <strong id="pageTotal">-</strong>
-      </div>
-      <div class="row good">
-        <span>Matched</span>
-        <strong id="pageMatched">-</strong>
-      </div>
-      <div class="row warn">
-        <span>Unmapped</span>
-        <strong id="pageUnmapped">-</strong>
-      </div>
-    </div>
 
-    <div id="unmappedSection" hidden>
-      <div class="unmappedHeader">Unmapped fields on this page</div>
-      <ul id="unmappedList" class="unmappedList"></ul>
+      <p class="logSaved" id="logSavedNote" hidden></p>
+
+      <div class="summary">
+        <div class="row">
+          <span>Saved fields (total)</span>
+          <strong id="totalFields">-</strong>
+        </div>
+        <div class="row">
+          <span>Fields on this page</span>
+          <strong id="pageTotal">-</strong>
+        </div>
+        <div class="row good">
+          <span>Matched</span>
+          <strong id="pageMatched">-</strong>
+        </div>
+        <div class="row warn">
+          <span>Unmapped</span>
+          <strong id="pageUnmapped">-</strong>
+        </div>
+      </div>
+
+      <div id="unmappedSection" hidden>
+        <div class="unmappedHeader">Unmapped fields on this page</div>
+        <ul id="unmappedList" class="unmappedList"></ul>
+        <p class="hint">
+          Type into one of these on the page and it'll be saved as a new field
+          automatically.
+        </p>
+      </div>
+
+      <div class="actions">
+        <button id="logToggleBtn">Log this application</button>
+        <button id="rescanBtn">Rescan &amp; Autofill This Page</button>
+        <button id="openEditorBtn" class="secondary">Open Full Editor</button>
+      </div>
+
       <p class="hint">
-        Type into one of these on the page and it'll be saved as a new field
-        automatically.
+        <button type="button" id="viewAllBtn" class="linkBtn">See all applications</button>
+      </p>
+
+      <p class="hint">
+        Anything you type into a form is saved automatically. If you change a
+        field that's already saved, the new value replaces the old one. Fields
+        that don't match anything yet get added to your profile as new entries.
+        Open the full editor any time to review your saved fields, rename them,
+        or edit their values.
+      </p>
+      <p class="hint muted">
+        Password and payment/ID fields are never read or saved.
       </p>
     </div>
 
-    <div class="actions">
-      <button id="rescanBtn">Rescan &amp; Autofill This Page</button>
-      <button id="openEditorBtn" class="secondary">Open Full Editor</button>
-    </div>
+    <div id="logView" hidden>
+      <div class="logHead">
+        <strong id="logFormTitle">Log this application</strong>
+        <button type="button" id="logCancelBtn" class="linkBtn">Cancel</button>
+      </div>
 
-    <p class="hint">
-      Anything you type into a form is saved automatically. If you change a
-      field that's already saved, the new value replaces the old one. Fields
-      that don't match anything yet get added to your profile as new entries.
-      Open the full editor any time to review your saved fields, rename them,
-      or edit their values.
-    </p>
-    <p class="hint muted">
-      Password and payment/ID fields are never read or saved.
-    </p>
+      <p class="logDupe" id="logDupe" hidden></p>
+
+      <div class="logField">
+        <label for="logCompany">Company</label>
+        <input
+          type="text"
+          id="logCompany"
+          list="companySuggestions"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="Wells Fargo"
+        />
+        <datalist id="companySuggestions"></datalist>
+      </div>
+
+      <div class="logField">
+        <label for="logTitle">Title</label>
+        <input
+          type="text"
+          id="logTitle"
+          list="titleSuggestions"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="Senior Software Engineer"
+        />
+        <datalist id="titleSuggestions"></datalist>
+      </div>
+
+      <div class="logField">
+        <label for="logStatus">Status</label>
+        <input
+          type="text"
+          id="logStatus"
+          list="statusSuggestions"
+          autocomplete="off"
+          placeholder="Applied"
+        />
+        <datalist id="statusSuggestions"></datalist>
+      </div>
+
+      <div class="logField">
+        <label for="logNotes">Notes</label>
+        <textarea id="logNotes" rows="2" placeholder="Note down what you did here"></textarea>
+      </div>
+
+      <p class="logMeta" id="logMeta"></p>
+
+      <button type="button" id="logSaveBtn">Save application</button>
+    </div>
   </div>
   <script src="storage.js"></script>
   <script src="popup.js"></script>

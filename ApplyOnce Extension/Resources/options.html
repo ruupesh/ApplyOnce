@@ -11,6 +11,7 @@
   <h1>ApplyOnce</h1>
   <nav class="tabs">
     <button class="tabBtn active" data-tab="fields">Fields</button>
+    <button class="tabBtn" data-tab="applications">Applications</button>
     <button class="tabBtn" data-tab="activity">Activity Log</button>
     <button class="tabBtn" data-tab="sites">Sites</button>
   </nav>
@@ -35,6 +36,16 @@
       <input type="checkbox" id="enabledToggle" />
       Extension enabled
     </label>
+  </div>
+  <div class="toolbar" id="applicationsToolbar" hidden>
+    <input
+      id="applicationSearch"
+      type="search"
+      aria-label="Search applications"
+      placeholder="Search company, title, status, or notes..."
+    />
+    <span class="activityHint" id="applicationCount"></span>
+    <button id="exportApplicationsBtn" class="secondary">Export CSV</button>
   </div>
   <div class="toolbar" id="activityToolbar" hidden>
     <span class="activityHint">What the extension has filled, saved, and recorded — newest first.</span>
@@ -67,6 +78,30 @@
       No fields saved yet. Browse to a job application with the extension
       enabled and start typing — fields save themselves as you go — or add one
       manually above.
+    </p>
+  </section>
+
+  <section id="applicationsSection" hidden>
+    <div class="tableWrap">
+      <table id="applicationsTable">
+        <thead>
+          <tr>
+            <th class="colCompany">Company</th>
+            <th class="colTitle">Title</th>
+            <th class="colStatus">Status</th>
+            <th class="colApplied">Applied</th>
+            <th class="colNotes">Notes</th>
+            <th class="colLink">Link</th>
+            <th class="colDelete"></th>
+          </tr>
+        </thead>
+        <tbody id="applicationsBody"></tbody>
+      </table>
+    </div>
+    <p id="applicationsEmptyState" class="empty" hidden>
+      No applications tracked yet. When you finish an application, click the
+      ApplyOnce toolbar button and choose "Log this application" — the company,
+      title, link, and time fill themselves in.
     </p>
   </section>
 

@@ -383,6 +383,103 @@ textarea.valueInput {
   text-align: center;
 }
 
+/* ---------- Applications tab ---------- */
+
+#applicationsTable {
+  min-width: 940px;
+}
+
+.colCompany {
+  width: 16%;
+  min-width: 150px;
+}
+.colTitle {
+  width: 22%;
+  min-width: 190px;
+}
+.colStatus {
+  width: 13%;
+  min-width: 165px; /* room for a custom status like "Take-home sent" */
+}
+.colApplied {
+  width: 14%;
+  min-width: 150px;
+  color: #6b7280;
+  font-size: 12px;
+}
+.colNotes {
+  width: 22%;
+  min-width: 190px;
+}
+.colLink {
+  width: 10%;
+  min-width: 110px;
+}
+
+.statusSelect {
+  width: 100%;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 7px;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+
+.statusSelect.applied {
+  background: #dbeafe;
+  color: #1d4ed8;
+  border-color: #bfdbfe;
+}
+.statusSelect.saved {
+  background: #f3f4f6;
+  color: #4b5563;
+  border-color: #e5e7eb;
+}
+.statusSelect.interviewing {
+  background: #fef9c3;
+  color: #854d0e;
+  border-color: #fde68a;
+}
+.statusSelect.offer {
+  background: #dcfce7;
+  color: #15803d;
+  border-color: #bbf7d0;
+}
+.statusSelect.rejected {
+  background: #fee2e2;
+  color: #b91c1c;
+  border-color: #fecaca;
+}
+/* Anything the user made up shares one neutral colour. */
+.statusSelect.custom {
+  background: #eef2ff;
+  color: #4338ca;
+  border-color: #c7d2fe;
+}
+
+.appliedWhen {
+  display: block;
+}
+
+.appliedReq {
+  display: block;
+  color: #9ca3af;
+  font-size: 11px;
+}
+
+/* Truncate rather than wrap: a long host must not push Delete off the row.
+   The full URL stays available via the title attribute. */
+.appLink {
+  display: block;
+  color: #2563eb;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ---------- Sites tab ---------- */
 
 .sitesPanel {

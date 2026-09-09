@@ -60,6 +60,11 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
         sendResponse({ ok: enabled });
       } else if (msg.type === "JAA_GET_PAGE_SUMMARY") {
         sendResponse(getPageSummary());
+      } else if (msg.type === "JAA_GET_APPLICATION_CONTEXT") {
+        // Tracking is deliberately independent of the per-site on/off switch:
+        // blocking a site stops autofill, it shouldn't stop you logging that
+        // you applied there.
+        sendResponse(getApplicationContext());
       }
       return false; // always responded synchronously above
     });
@@ -2267,6 +2272,123 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
       unmapped: unmapped,
       unmappedLabels: unmappedLabels,
       enabled: enabled
+    };
+  }
+
+  // ---------- Application tracking ----------
+  //
+  // Detection ladder. Company and title rank different sources on purpose:
+  // schema.org markup carries the *legal entity* ("I01 Wells Fargo
+  // International Solutions Private LTD"), while the Workday tenant site in
+  // the URL carries the brand a job seeker recognises ("Wells Fargo"). So the
+  // URL wins for company, and the schema wins for the job title.
+  //   company: URL -> JSON-LD (legal suffixes stripped) -> og:site_name -> <title> -> hostname
+  //   title:   JSON-LD -> URL -> <title> -> og:title
+  // Whatever survives is only a prefill; the popup lets the user fix it.
+
+  var ROLE_HINT_RE =
+    /\b(engineer|engineering|developer|programmer|manager|analyst|designer|scientist|architect|consultant|specialist|associate|director|lead|intern|internship|administrator|technician|accountant|recruiter|attorney|counsel|officer|representative|coordinator|supervisor|president|sde|swe|qa|devops)\b/i;
+
+  function metaContent(selector) {
+    var el = document.querySelector(selector);
+    var value = el ? el.getAttribute("content") || "" : "";
+    return value.trim();
+  }
+
+  function findJobPosting(node, depth) {
+    if (!node || typeof node !== "object" || (depth || 0) > 6) return null;
+    if (Array.isArray(node)) {
+      for (var i = 0; i < node.length; i++) {
+        var hit = findJobPosting(node[i], (depth || 0) + 1);
+        if (hit) return hit;
+      }
+      return null;
+    }
+    var type = node["@type"];
+    if (type === "JobPosting" || (Array.isArray(type) && type.indexOf("JobPosting") !== -1)) {
+      return node;
+    }
+    if (node["@graph"]) return findJobPosting(node["@graph"], (depth || 0) + 1);
+    return null;
+  }
+
+  function readJobPostingSchema() {
+    var nodes = document.querySelectorAll('script[type="application/ld+json"]');
+    for (var i = 0; i < nodes.length; i++) {
+      var data = null;
+      try {
+        data = JSON.parse(nodes[i].textContent || "null");
+      } catch (error) {
+        continue; // malformed block — try the next one
+      }
+      var posting = findJobPosting(data, 0);
+      if (posting) return posting;
+    }
+    return null;
+  }
+
+  function schemaOrganizationName(posting) {
+    var org = posting && posting.hiringOrganization;
+    if (!org) return "";
+    if (typeof org === "string") return org.trim();
+    if (Array.isArray(org)) org = org[0] || {};
+    return String((org && org.name) || "").trim();
+  }
+
+  // "Senior Software Engineer | Wells Fargo" -> title + company, either order.
+  function splitDocumentTitle() {
+    var parts = String(document.title || "")
+      .split(/\s*[|–—·•]\s*|\s+-\s+/)
+      .map(function (part) {
+        return part.trim();
+      })
+      .filter(Boolean);
+    if (parts.length < 2) return { title: "", company: "" };
+
+    var roleIdx = -1;
+    for (var i = 0; i < parts.length; i++) {
+      if (ROLE_HINT_RE.test(parts[i])) {
+        roleIdx = i;
+        break;
+      }
+    }
+    if (roleIdx === -1) {
+      // No obvious job wording: assume the common "Title | Company" order.
+      return { title: parts[0], company: parts[parts.length - 1] };
+    }
+    var companyIdx = roleIdx === 0 ? parts.length - 1 : 0;
+    return { title: parts[roleIdx], company: parts[companyIdx] };
+  }
+
+  function getApplicationContext() {
+    var url = location.href;
+    var fromUrl = jaaGuessFromUrl(url);
+    var posting = readJobPostingSchema();
+    var fromTitle = splitDocumentTitle();
+
+    var company =
+      fromUrl.company ||
+      jaaCleanLegalName(schemaOrganizationName(posting)) ||
+      metaContent('meta[property="og:site_name"]') ||
+      metaContent('meta[name="application-name"]') ||
+      fromTitle.company ||
+      jaaCompanyFromHost(location.hostname);
+
+    var title =
+      String((posting && posting.title) || "").trim() ||
+      fromUrl.title ||
+      fromTitle.title ||
+      metaContent('meta[property="og:title"]') ||
+      String(document.title || "").trim();
+
+    return {
+      url: url,
+      baseUrl: location.origin,
+      host: jaaNormalizeHost(location.hostname),
+      pageTitle: String(document.title || "").trim(),
+      company: String(company || "").slice(0, 120),
+      title: String(title || "").slice(0, 160),
+      reqId: String(fromUrl.reqId || "").slice(0, 60)
     };
   }
 

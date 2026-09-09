@@ -50,7 +50,8 @@ function loadStorage(namespace, initial) {
     [namespace]: api,
     console,
     setTimeout,
-    clearTimeout
+    clearTimeout,
+    URL
   });
   vm.runInContext(
     fs.readFileSync(path.join(resourcesRoot, "storage.js"), "utf8"),
@@ -177,11 +178,135 @@ test("getState backfills the per-site policy for older profiles", async () => {
   assert.equal(state.siteMode, "all");
   assert.deepEqual(Array.from(state.allowedSites), []);
   assert.deepEqual(Array.from(state.blockedSites), []);
+  assert.deepEqual(Array.from(state.applications), []);
 
   const defaults = context.jaaDefaultState();
   assert.equal(defaults.siteMode, "all");
   assert.deepEqual(Array.from(defaults.allowedSites), []);
   assert.deepEqual(Array.from(defaults.blockedSites), []);
+  assert.deepEqual(Array.from(defaults.applications), []);
+});
+
+test("application details are guessed out of job-board URLs", () => {
+  const { context } = loadStorage("browser");
+
+  // The case that started this: nothing in the hostname says "Wells Fargo",
+  // but the Workday tenant site and job segment carry both fields.
+  const workday = context.jaaGuessFromUrl(
+    "https://wd1.myworkdaysite.com/en-US/recruiting/wf/WellsFargoJobs/job/Hyderabad%2C-India/Senior-Software-Engineer_R-572872/apply/useMyLastApplication"
+  );
+  assert.equal(workday.company, "Wells Fargo");
+  assert.equal(workday.title, "Senior Software Engineer");
+  assert.equal(workday.reqId, "R-572872");
+
+  // Company lives in the first path segment on these boards.
+  assert.equal(
+    context.jaaGuessFromUrl("https://boards.greenhouse.io/stripe/jobs/4512345").company,
+    "Stripe"
+  );
+  assert.equal(
+    context.jaaGuessFromUrl("https://jobs.lever.co/figma/8a1c-9f2b").company,
+    "Figma"
+  );
+  // Tenant lives in the subdomain here.
+  assert.equal(
+    context.jaaGuessFromUrl("https://careers-acme.icims.com/jobs/1234/login").company,
+    "Acme"
+  );
+  // Plain career site: strip the "careers." prefix.
+  assert.equal(
+    context.jaaGuessFromUrl("https://careers.datadoghq.com/detail/99/").company,
+    "Datadoghq"
+  );
+  // Nothing useful to say, rather than something wrong.
+  assert.equal(context.jaaGuessFromUrl("not a url").company, "");
+
+  assert.equal(context.jaaCleanCompany("AcmeExternalCareerSite"), "Acme");
+  assert.equal(context.jaaCleanCompany("IBMJobs"), "IBM");
+
+  // schema.org gives the legal entity; trim it back toward the brand.
+  assert.equal(
+    context.jaaCleanLegalName("I01 Wells Fargo International Solutions Private LTD"),
+    "Wells Fargo International Solutions"
+  );
+  assert.equal(context.jaaCleanLegalName("Stripe, Inc."), "Stripe");
+  assert.equal(context.jaaCleanLegalName("Cisco"), "Cisco");
+
+  assert.deepEqual(
+    { ...context.jaaCleanTitle("Staff-Data-Scientist_JR-88123") },
+    { title: "Staff Data Scientist", reqId: "JR-88123" }
+  );
+});
+
+test("tracked applications dedupe by URL and feed the type-ahead", () => {
+  const { context } = loadStorage("browser");
+  const state = {
+    applications: [
+      { id: "a", url: "https://x.test/1", company: "Acme", title: "SDE2", updatedAt: 10 },
+      { id: "b", url: "https://x.test/2", company: "Globex", title: "SDE3", updatedAt: 30 },
+      { id: "c", url: "https://x.test/3", company: "Acme", title: "SDE2", updatedAt: 20 }
+    ]
+  };
+
+  assert.equal(context.jaaFindApplicationByUrl(state, "https://x.test/2").id, "b");
+  assert.equal(context.jaaFindApplicationByUrl(state, "https://x.test/9"), null);
+
+  // Newest first, no repeats — this is what the popup's datalist shows.
+  assert.deepEqual(Array.from(context.jaaApplicationSuggestions(state, "company")), [
+    "Globex",
+    "Acme"
+  ]);
+  assert.deepEqual(Array.from(context.jaaApplicationSuggestions(state, "title")), ["SDE3", "SDE2"]);
+});
+
+test("application status is free text with the suggested ones canonicalised", () => {
+  const { context } = loadStorage("browser");
+
+  // Same status typed three ways stays one status.
+  assert.equal(context.jaaCanonicalStatus("applied"), "Applied");
+  assert.equal(context.jaaCanonicalStatus("  INTERVIEWING "), "Interviewing");
+  assert.equal(context.jaaCanonicalStatus(""), "Applied");
+  // Anything else is kept exactly as the user wrote it.
+  assert.equal(context.jaaCanonicalStatus("Take-home sent"), "Take-home sent");
+
+  assert.equal(context.jaaStatusClass("offer"), "offer");
+  assert.equal(context.jaaStatusClass("Take-home sent"), "custom");
+
+  const state = {
+    applications: [
+      { id: "a", status: "Take-home sent" },
+      { id: "b", status: "applied" },
+      { id: "c", status: "Ghosted" }
+    ]
+  };
+  // Suggestions first, then the custom ones already in use, no duplicates.
+  assert.deepEqual(Array.from(context.jaaApplicationStatusOptions(state)), [
+    "Applied",
+    "Saved",
+    "Interviewing",
+    "Offer",
+    "Rejected",
+    "Take-home sent",
+    "Ghosted"
+  ]);
+});
+
+test("getState migrates applications written before the title/status rename", async () => {
+  const { context } = loadStorage("browser", {
+    jaaState: {
+      version: 1,
+      enabled: true,
+      fields: {},
+      activityLog: [],
+      applications: [{ id: "a", url: "https://x.test/1", company: "Acme", role: "SDE2", status: "interviewing" }]
+    }
+  });
+
+  const state = await context.getState();
+  const entry = state.applications[0];
+  assert.equal(entry.title, "SDE2");
+  assert.equal("role" in entry, false);
+  assert.equal(entry.status, "Interviewing");
 });
 
 test("per-site policy decides where the extension runs", () => {
@@ -283,7 +408,24 @@ test("popup messaging and Safari editor fallback use Promise APIs", async () => 
     "siteStatus",
     "siteBtns",
     "siteModeSelect",
-    "siteHint"
+    "siteHint",
+    "mainView",
+    "logView",
+    "logToggleBtn",
+    "logCancelBtn",
+    "logSaveBtn",
+    "logFormTitle",
+    "logCompany",
+    "logTitle",
+    "logStatus",
+    "logNotes",
+    "logMeta",
+    "logDupe",
+    "logSavedNote",
+    "companySuggestions",
+    "titleSuggestions",
+    "statusSuggestions",
+    "viewAllBtn"
   ];
   const elements = Object.fromEntries(ids.map((id) => [id, fakeElement()]));
   const messages = [];
@@ -305,6 +447,17 @@ test("popup messaging and Safari editor fallback use Promise APIs", async () => 
         messages.push({ tabId, message });
         if (message.type === "JAA_GET_PAGE_SUMMARY") {
           return { total: 3, mapped: 2, unmapped: 1, unmappedLabels: ["Portfolio"] };
+        }
+        if (message.type === "JAA_GET_APPLICATION_CONTEXT") {
+          return {
+            url: "https://jobs.example/apply",
+            baseUrl: "https://jobs.example",
+            host: "jobs.example",
+            pageTitle: "Senior Software Engineer | Wells Fargo",
+            company: "Wells Fargo",
+            title: "Senior Software Engineer",
+            reqId: "R-572872"
+          };
         }
         return { ok: true };
       },
@@ -329,6 +482,7 @@ test("popup messaging and Safari editor fallback use Promise APIs", async () => 
       siteMode: "all",
       allowedSites: [],
       blockedSites: [],
+      applications: [],
       fields: { email: {}, name: {} }
     }),
     jaaBrowser: api,
@@ -338,7 +492,16 @@ test("popup messaging and Safari editor fallback use Promise APIs", async () => 
     jaaNormalizeHost: storageModule.jaaNormalizeHost,
     jaaHostFromUrl: storageModule.jaaHostFromUrl,
     jaaHostInList: storageModule.jaaHostInList,
-    jaaShouldRunOnHost: storageModule.jaaShouldRunOnHost
+    jaaShouldRunOnHost: storageModule.jaaShouldRunOnHost,
+    jaaParseUrl: storageModule.jaaParseUrl,
+    jaaGuessFromUrl: storageModule.jaaGuessFromUrl,
+    jaaCompanyFromHost: storageModule.jaaCompanyFromHost,
+    jaaNewApplicationId: storageModule.jaaNewApplicationId,
+    jaaLocalTimeZone: storageModule.jaaLocalTimeZone,
+    jaaFindApplicationByUrl: storageModule.jaaFindApplicationByUrl,
+    jaaApplicationSuggestions: storageModule.jaaApplicationSuggestions,
+    jaaApplicationStatusOptions: storageModule.jaaApplicationStatusOptions,
+    jaaCanonicalStatus: storageModule.jaaCanonicalStatus
   });
 
   vm.runInContext(fs.readFileSync(path.join(resourcesRoot, "popup.js"), "utf8"), context, {
@@ -362,6 +525,38 @@ test("popup messaging and Safari editor fallback use Promise APIs", async () => 
   assert.ok(savedState.blockedSites.includes("jobs.example"));
   assert.equal(elements.siteStatus.textContent, "Off");
   assert.equal(elements.siteBtns.children[0].textContent, "Unblock this site");
+
+  // Logging an application prefills from what the content script detected.
+  await elements.logToggleBtn.listeners.click();
+  assert.equal(elements.mainView.hidden, true);
+  assert.equal(elements.logView.hidden, false);
+  assert.equal(elements.logCompany.value, "Wells Fargo");
+  assert.equal(elements.logTitle.value, "Senior Software Engineer");
+  assert.equal(elements.logStatus.value, "Applied");
+  assert.match(elements.logMeta.textContent, /jobs\.example/);
+  assert.match(elements.logMeta.textContent, /R-572872/);
+
+  elements.logNotes.value = "Referral from Priya";
+  await elements.logSaveBtn.listeners.click();
+
+  assert.equal(savedState.applications.length, 1);
+  const logged = savedState.applications[0];
+  assert.equal(logged.company, "Wells Fargo");
+  assert.equal(logged.title, "Senior Software Engineer");
+  assert.equal(logged.notes, "Referral from Priya");
+  assert.equal(logged.status, "Applied");
+  assert.equal(logged.url, "https://jobs.example/apply");
+  assert.equal(logged.baseUrl, "https://jobs.example");
+  assert.equal(logged.reqId, "R-572872");
+  assert.ok(logged.appliedAt > 0);
+  assert.equal(elements.mainView.hidden, false);
+
+  // Same URL again edits the existing row instead of adding a second one.
+  assert.equal(elements.logToggleBtn.textContent, "Update this application");
+  await elements.logToggleBtn.listeners.click();
+  assert.equal(elements.logDupe.hidden, false);
+  await elements.logSaveBtn.listeners.click();
+  assert.equal(savedState.applications.length, 1);
 
   await elements.rescanBtn.listeners.click();
   assert.ok(messages.some(({ message }) => message.type === "JAA_RESCAN"));

@@ -5,6 +5,10 @@ var searchInput = document.getElementById("search");
 var enabledToggle = document.getElementById("enabledToggle");
 var activityBody = document.getElementById("activityBody");
 var activityEmptyState = document.getElementById("activityEmptyState");
+var applicationsBody = document.getElementById("applicationsBody");
+var applicationsEmptyState = document.getElementById("applicationsEmptyState");
+var applicationSearch = document.getElementById("applicationSearch");
+var applicationCount = document.getElementById("applicationCount");
 
 init();
 
@@ -21,14 +25,17 @@ async function init() {
   document.getElementById("exportBtn").addEventListener("click", exportJSON);
   document.getElementById("importInput").addEventListener("change", importJSON);
   document.getElementById("clearLogBtn").addEventListener("click", clearLog);
+  document.getElementById("exportApplicationsBtn").addEventListener("click", exportApplicationsCSV);
   searchInput.addEventListener("input", renderFields);
+  applicationSearch.addEventListener("input", renderApplications);
 
   Array.prototype.forEach.call(document.querySelectorAll(".tabBtn"), function (btn) {
     btn.addEventListener("click", function () {
       switchTab(btn.dataset.tab);
     });
   });
-  switchTab("fields");
+  // The popup deep-links here with options.html#applications.
+  switchTab(tabFromHash() || "fields");
 
   Array.prototype.forEach.call(
     document.querySelectorAll('input[name="siteMode"]'),
@@ -47,11 +54,19 @@ async function init() {
     renderFields();
     renderActivity();
     renderSites();
+    renderApplications();
   });
 
   renderFields();
   renderActivity();
   renderSites();
+  renderApplications();
+}
+
+function tabFromHash() {
+  var name = String(location.hash || "").replace(/^#/, "");
+  if (!/^[a-z]+$/.test(name)) return ""; // keep the hash out of the selector
+  return document.querySelector('.tabBtn[data-tab="' + name + '"]') ? name : "";
 }
 
 function switchTab(tab) {
@@ -59,11 +74,225 @@ function switchTab(tab) {
     btn.classList.toggle("active", btn.dataset.tab === tab);
   });
   document.getElementById("fieldsSection").hidden = tab !== "fields";
+  document.getElementById("applicationsSection").hidden = tab !== "applications";
   document.getElementById("activitySection").hidden = tab !== "activity";
   document.getElementById("sitesSection").hidden = tab !== "sites";
   document.getElementById("fieldsToolbar").hidden = tab !== "fields";
+  document.getElementById("applicationsToolbar").hidden = tab !== "applications";
   document.getElementById("activityToolbar").hidden = tab !== "activity";
   document.getElementById("sitesToolbar").hidden = tab !== "sites";
+}
+
+// ---------- Applications tab ----------
+
+var ADD_CUSTOM_STATUS = "__custom__";
+
+function formatAppliedAt(ts) {
+  if (!ts) return "-";
+  var when = new Date(ts);
+  try {
+    return when.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  } catch (error) {
+    return when.toLocaleString();
+  }
+}
+
+function renderApplications() {
+  var query = applicationSearch.value.trim().toLowerCase();
+  var all = Array.isArray(state.applications) ? state.applications : [];
+
+  var sorted = all.slice().sort(function (a, b) {
+    return (b.appliedAt || 0) - (a.appliedAt || 0);
+  });
+
+  var visible = sorted.filter(function (entry) {
+    if (!query) return true;
+    var haystack = [entry.company, entry.title, entry.notes, entry.status, entry.host, entry.reqId]
+      .join(" ")
+      .toLowerCase();
+    return haystack.indexOf(query) !== -1;
+  });
+
+  applicationsBody.innerHTML = "";
+  applicationsEmptyState.hidden = all.length !== 0;
+  applicationCount.textContent = query
+    ? visible.length + " of " + all.length + " tracked"
+    : all.length + (all.length === 1 ? " application tracked" : " applications tracked");
+
+  visible.forEach(function (entry) {
+    applicationsBody.appendChild(buildApplicationRow(entry));
+  });
+}
+
+async function updateApplication(id, apply) {
+  var entry = (state.applications || []).filter(function (item) {
+    return item.id === id;
+  })[0];
+  if (!entry) return;
+  apply(entry);
+  entry.updatedAt = Date.now();
+  await setState(state);
+}
+
+function buildApplicationRow(entry) {
+  var tr = document.createElement("tr");
+
+  var companyTd = document.createElement("td");
+  var companyInput = document.createElement("input");
+  companyInput.className = "keyInput";
+  companyInput.value = entry.company || "";
+  companyInput.addEventListener("change", function () {
+    updateApplication(entry.id, function (item) {
+      item.company = companyInput.value.trim();
+    });
+  });
+  companyTd.appendChild(companyInput);
+
+  var titleTd = document.createElement("td");
+  var titleInput = document.createElement("input");
+  titleInput.className = "keyInput";
+  titleInput.value = entry.title || "";
+  titleInput.addEventListener("change", function () {
+    updateApplication(entry.id, function (item) {
+      item.title = titleInput.value.trim();
+    });
+  });
+  titleTd.appendChild(titleInput);
+
+  var statusTd = document.createElement("td");
+  var status = jaaCanonicalStatus(entry.status);
+  var statusSelect = document.createElement("select");
+  statusSelect.className = "statusSelect " + jaaStatusClass(status);
+  jaaApplicationStatusOptions(state).forEach(function (value) {
+    var option = document.createElement("option");
+    option.value = value;
+    option.textContent = value;
+    if (value === status) option.selected = true;
+    statusSelect.appendChild(option);
+  });
+  // Escape hatch so a brand-new status can be added without leaving the table.
+  var customOption = document.createElement("option");
+  customOption.value = ADD_CUSTOM_STATUS;
+  customOption.textContent = "+ Add custom status...";
+  statusSelect.appendChild(customOption);
+
+  statusSelect.addEventListener("change", async function () {
+    var chosen = statusSelect.value;
+    if (chosen === ADD_CUSTOM_STATUS) {
+      var typed = prompt("Name this status", status);
+      chosen = jaaCanonicalStatus(typed || "");
+      if (!typed || !typed.trim()) {
+        statusSelect.value = status; // cancelled — put the old one back
+        return;
+      }
+    }
+    await updateApplication(entry.id, function (item) {
+      item.status = chosen;
+    });
+    renderApplications(); // a new status has to reach every row's dropdown
+  });
+  statusTd.appendChild(statusSelect);
+
+  var appliedTd = document.createElement("td");
+  var when = document.createElement("span");
+  when.className = "appliedWhen";
+  when.textContent = formatAppliedAt(entry.appliedAt);
+  appliedTd.appendChild(when);
+  if (entry.reqId) {
+    var req = document.createElement("span");
+    req.className = "appliedReq";
+    req.textContent = "Req " + entry.reqId;
+    appliedTd.appendChild(req);
+  }
+
+  var notesTd = document.createElement("td");
+  var notesInput = document.createElement("textarea");
+  notesInput.className = "valueInput";
+  notesInput.rows = 1;
+  notesInput.value = entry.notes || "";
+  notesInput.addEventListener("change", function () {
+    updateApplication(entry.id, function (item) {
+      item.notes = notesInput.value.trim();
+    });
+  });
+  notesTd.appendChild(notesInput);
+
+  var linkTd = document.createElement("td");
+  if (entry.url) {
+    var link = document.createElement("a");
+    link.className = "appLink";
+    link.href = entry.url;
+    link.target = "_blank";
+    link.rel = "noreferrer noopener";
+    link.textContent = entry.host || entry.baseUrl || "Open";
+    link.title = entry.url;
+    linkTd.appendChild(link);
+  } else {
+    linkTd.textContent = "-";
+  }
+
+  var deleteTd = document.createElement("td");
+  var deleteBtn = document.createElement("button");
+  deleteBtn.className = "deleteBtn";
+  deleteBtn.textContent = "Delete";
+  deleteBtn.addEventListener("click", async function () {
+    var name = [entry.company, entry.title].filter(Boolean).join(" — ") || "this application";
+    if (!confirm("Delete " + name + "?")) return;
+    state.applications = (state.applications || []).filter(function (item) {
+      return item.id !== entry.id;
+    });
+    await setState(state);
+    renderApplications();
+  });
+  deleteTd.appendChild(deleteBtn);
+
+  tr.appendChild(companyTd);
+  tr.appendChild(titleTd);
+  tr.appendChild(statusTd);
+  tr.appendChild(appliedTd);
+  tr.appendChild(notesTd);
+  tr.appendChild(linkTd);
+  tr.appendChild(deleteTd);
+  return tr;
+}
+
+function csvCell(value) {
+  return '"' + String(value == null ? "" : value).replace(/"/g, '""') + '"';
+}
+
+function exportApplicationsCSV() {
+  var rows = [["Company", "Title", "Status", "Applied", "Requisition", "Notes", "Site", "URL"]];
+  (state.applications || [])
+    .slice()
+    .sort(function (a, b) {
+      return (b.appliedAt || 0) - (a.appliedAt || 0);
+    })
+    .forEach(function (entry) {
+      rows.push([
+        entry.company,
+        entry.title,
+        jaaCanonicalStatus(entry.status),
+        formatAppliedAt(entry.appliedAt),
+        entry.reqId,
+        entry.notes,
+        entry.host,
+        entry.url
+      ]);
+    });
+
+  var csv = rows
+    .map(function (row) {
+      return row.map(csvCell).join(",");
+    })
+    .join("\r\n");
+
+  var blob = new Blob([csv], { type: "text/csv" });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement("a");
+  a.href = url;
+  a.download = "applyonce-applications.csv";
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 // ---------- Sites tab ----------
@@ -547,12 +776,14 @@ async function importJSON(e) {
     if (state.siteMode !== "allowlist") state.siteMode = "all";
     if (!Array.isArray(state.allowedSites)) state.allowedSites = [];
     if (!Array.isArray(state.blockedSites)) state.blockedSites = [];
+    if (!Array.isArray(state.applications)) state.applications = [];
   }
   await setState(state);
   enabledToggle.checked = state.enabled !== false;
   renderFields();
   renderActivity();
   renderSites();
+  renderApplications();
   e.target.value = "";
 }
 

@@ -11,10 +11,29 @@ var siteBtnsEl = document.getElementById("siteBtns");
 var siteModeSelect = document.getElementById("siteModeSelect");
 var siteHintEl = document.getElementById("siteHint");
 var rescanBtn = document.getElementById("rescanBtn");
+var mainView = document.getElementById("mainView");
+var logView = document.getElementById("logView");
+var logToggleBtn = document.getElementById("logToggleBtn");
+var logCancelBtn = document.getElementById("logCancelBtn");
+var logSaveBtn = document.getElementById("logSaveBtn");
+var logFormTitle = document.getElementById("logFormTitle");
+var logCompany = document.getElementById("logCompany");
+var logTitle = document.getElementById("logTitle");
+var logStatus = document.getElementById("logStatus");
+var logNotes = document.getElementById("logNotes");
+var logMeta = document.getElementById("logMeta");
+var logDupe = document.getElementById("logDupe");
+var logSavedNote = document.getElementById("logSavedNote");
+var companySuggestions = document.getElementById("companySuggestions");
+var titleSuggestions = document.getElementById("titleSuggestions");
+var statusSuggestions = document.getElementById("statusSuggestions");
+var viewAllBtn = document.getElementById("viewAllBtn");
 
 var state = null;
 var currentTab = null;
 var currentHost = "";
+var appContext = null; // what we detected about the page being logged
+var editingId = null; // set when this URL is already in the list
 
 init();
 
@@ -29,8 +48,13 @@ async function init() {
   rescanBtn.addEventListener("click", onRescan);
   document.getElementById("openEditorBtn").addEventListener("click", openEditor);
   siteModeSelect.addEventListener("change", onSiteModeChange);
+  logToggleBtn.addEventListener("click", openLogForm);
+  logCancelBtn.addEventListener("click", closeLogForm);
+  logSaveBtn.addEventListener("click", saveApplication);
+  viewAllBtn.addEventListener("click", openApplicationsTab);
 
   renderSiteCard();
+  refreshLogButton();
   requestPageSummary();
 }
 
@@ -124,6 +148,150 @@ async function onSiteModeChange() {
   await setState(state);
   renderSiteCard();
   requestPageSummary();
+}
+
+// ---------- Log an application ----------
+
+function refreshLogButton() {
+  var url = (currentTab && currentTab.url) || "";
+  var trackable = /^https?:\/\//i.test(url);
+  logToggleBtn.hidden = !trackable;
+  if (!trackable) return;
+  editingId = null;
+  var existing = jaaFindApplicationByUrl(state, url);
+  if (existing) editingId = existing.id;
+  logToggleBtn.textContent = existing ? "Update this application" : "Log this application";
+}
+
+function formatTimestamp(ts) {
+  var when = new Date(ts);
+  try {
+    return when.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  } catch (error) {
+    return when.toLocaleString(); // older engines reject the options bag
+  }
+}
+
+function originFromUrl(url) {
+  var parsed = jaaParseUrl(url);
+  return parsed ? parsed.origin : "";
+}
+
+// Ask the content script (it can read JSON-LD and meta tags). If it isn't
+// there — restricted page, script blocked — guess from the URL alone.
+async function fetchApplicationContext() {
+  var url = (currentTab && currentTab.url) || "";
+  if (currentTab) {
+    try {
+      var resp = await sendPageMessage(currentTab, { type: "JAA_GET_APPLICATION_CONTEXT" });
+      if (resp && resp.url) return resp;
+    } catch (error) {
+      // No receiving content script — fall through to the URL-only guess.
+    }
+  }
+  var guess = jaaGuessFromUrl(url);
+  var pageTitle = (currentTab && currentTab.title) || "";
+  return {
+    url: url,
+    baseUrl: originFromUrl(url),
+    host: currentHost,
+    pageTitle: pageTitle,
+    company: guess.company || jaaCompanyFromHost(currentHost),
+    title: guess.title || pageTitle,
+    reqId: guess.reqId
+  };
+}
+
+function fillSuggestions(listEl, values) {
+  listEl.innerHTML = "";
+  values.slice(0, 25).forEach(function (value) {
+    var option = document.createElement("option");
+    option.value = value;
+    listEl.appendChild(option);
+  });
+}
+
+async function openLogForm() {
+  logSavedNote.hidden = true;
+  appContext = await fetchApplicationContext();
+
+  var existing = jaaFindApplicationByUrl(state, appContext.url);
+  editingId = existing ? existing.id : null;
+
+  // Everything you typed before becomes a one-tap suggestion.
+  fillSuggestions(companySuggestions, jaaApplicationSuggestions(state, "company"));
+  fillSuggestions(titleSuggestions, jaaApplicationSuggestions(state, "title"));
+  fillSuggestions(statusSuggestions, jaaApplicationStatusOptions(state));
+
+  logCompany.value = existing ? existing.company || "" : appContext.company || "";
+  logTitle.value = existing ? existing.title || "" : appContext.title || "";
+  logNotes.value = existing ? existing.notes || "" : "";
+  logStatus.value = jaaCanonicalStatus(existing ? existing.status : "");
+
+  logFormTitle.textContent = existing ? "Update this application" : "Log this application";
+  logSaveBtn.textContent = existing ? "Update application" : "Save application";
+  logDupe.hidden = !existing;
+  if (existing) {
+    logDupe.textContent =
+      "You logged this one on " + formatTimestamp(existing.appliedAt) + ". Saving updates it.";
+  }
+
+  var meta = [appContext.host || "this page", formatTimestamp(Date.now())];
+  if (appContext.reqId) meta.push("Req " + appContext.reqId);
+  logMeta.textContent = meta.join(" · ");
+
+  mainView.hidden = true;
+  logView.hidden = false;
+  if (typeof logCompany.focus === "function") logCompany.focus();
+}
+
+function closeLogForm() {
+  logView.hidden = true;
+  mainView.hidden = false;
+}
+
+async function saveApplication() {
+  if (!appContext) return;
+  var now = Date.now();
+  if (!Array.isArray(state.applications)) state.applications = [];
+
+  var existing = editingId
+    ? state.applications.filter(function (entry) {
+        return entry.id === editingId;
+      })[0]
+    : null;
+
+  var record = existing || {
+    id: jaaNewApplicationId(),
+    appliedAt: now,
+    timeZone: jaaLocalTimeZone()
+  };
+
+  record.url = appContext.url;
+  record.baseUrl = appContext.baseUrl;
+  record.host = appContext.host;
+  record.company = logCompany.value.trim();
+  record.title = logTitle.value.trim();
+  record.reqId = appContext.reqId || record.reqId || "";
+  record.notes = logNotes.value.trim();
+  record.status = jaaCanonicalStatus(logStatus.value);
+  record.updatedAt = now;
+
+  if (!existing) state.applications.push(record);
+  await setState(state);
+
+  closeLogForm();
+  logSavedNote.hidden = false;
+  logSavedNote.textContent = existing
+    ? "Updated. " + state.applications.length + " applications tracked."
+    : "Logged. " + state.applications.length + " applications tracked.";
+  refreshLogButton();
+}
+
+async function openApplicationsTab() {
+  await jaaBrowser.tabs.create({
+    url: jaaBrowser.runtime.getURL("options.html#applications")
+  });
 }
 
 async function openEditor() {
