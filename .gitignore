@@ -4,7 +4,7 @@
 # Xcode user data and build products
 DerivedData/
 build/
-dist/
+# dist/
 xcuserdata/
 *.xcuserstate
 *.xccheckout

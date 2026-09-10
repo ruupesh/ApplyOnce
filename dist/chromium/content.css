@@ -1,0 +1,22 @@
+#jaa-badge {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  z-index: 2147483647;
+  background: #1f2937;
+  color: #fff;
+  font: 12px/1.4 -apple-system, "Segoe UI", Roboto, sans-serif;
+  padding: 8px 12px;
+  border-radius: 8px;
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  pointer-events: none;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  max-width: 260px;
+}
+
+#jaa-badge.jaa-badge-show {
+  opacity: 0.95;
+  transform: translateY(0);
+}

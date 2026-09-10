@@ -1,0 +1,646 @@
+* {
+  box-sizing: border-box;
+}
+
+html {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100%;
+  font: 14px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: #1f2937;
+  background: #f9fafb;
+}
+
+header {
+  background: #fff;
+  border-bottom: 1px solid #e5e7eb;
+  padding: 16px 24px;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+h1 {
+  font-size: 18px;
+  margin: 0 0 12px;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* An attribute selector is needed to beat `.toolbar { display: flex }` — a bare
+   [hidden] loses to it, which left the inactive tab's toolbar on screen. */
+.toolbar[hidden] {
+  display: none;
+}
+
+#search {
+  flex: 1;
+  min-width: 200px;
+  font: inherit;
+  padding: 7px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+}
+
+button,
+.fileBtn {
+  font: inherit;
+  padding: 7px 12px;
+  border-radius: 6px;
+  border: 1px solid #1f2937;
+  background: #1f2937;
+  color: #fff;
+  cursor: pointer;
+  display: inline-block;
+}
+
+button:hover,
+.fileBtn:hover {
+  opacity: 0.9;
+}
+
+button.secondary {
+  background: #fff;
+  color: #1f2937;
+  border-color: #d1d5db;
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  cursor: pointer;
+  user-select: none;
+  color: #374151;
+}
+
+main {
+  padding: 20px 24px 60px;
+}
+
+/* Horizontal scroll lives here so a wide, multi-column table never forces the
+   whole page sideways. On phones the table keeps its readable column widths
+   and this container scrolls; on desktop it just fills the width. */
+.tableWrap {
+  width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #fff;
+}
+
+#fieldsTable {
+  min-width: 900px;
+}
+
+#activityTable {
+  min-width: 700px;
+}
+
+th {
+  text-align: left;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #6b7280;
+  background: #f3f4f6;
+  padding: 10px 12px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+td {
+  padding: 8px 10px;
+  border-bottom: 1px solid #f3f4f6;
+  vertical-align: top;
+}
+
+tr:last-child td {
+  border-bottom: none;
+}
+
+.colKey {
+  width: 14%;
+  min-width: 110px;
+}
+.colValue {
+  width: 24%;
+  min-width: 200px;
+}
+.colType {
+  width: 10%;
+  min-width: 104px;
+}
+.colPath {
+  width: 16%;
+  min-width: 150px;
+}
+.colAliases {
+  width: 22%;
+  min-width: 190px;
+}
+.colUpdated {
+  width: 10%;
+  min-width: 92px;
+  white-space: nowrap;
+  color: #6b7280;
+  font-size: 12px;
+}
+.colDelete {
+  width: 4%;
+  min-width: 74px;
+}
+
+.pathSteps {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px;
+}
+
+.pathStep {
+  display: inline-block;
+  font-size: 11px;
+  color: #4338ca;
+  background: #eef2ff;
+  border: 1px solid #c7d2fe;
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
+.pathStep.final {
+  color: #15803d;
+  background: #dcfce7;
+  border-color: #bbf7d0;
+  font-weight: 600;
+}
+
+.pathArrow {
+  color: #9ca3af;
+  font-size: 11px;
+}
+
+.clearPathBtn {
+  font-size: 10.5px;
+  padding: 1px 6px;
+  background: #fff;
+  color: #6b7280;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  margin-left: 2px;
+}
+
+.noPath {
+  color: #9ca3af;
+  font-size: 11.5px;
+}
+
+/* Path column needs room now that it shows real step names */
+.colPath {
+  width: 18%;
+  min-width: 150px;
+}
+
+/* ---------- Tabs ---------- */
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.tabBtn {
+  background: #fff;
+  color: #6b7280;
+  border: 1px solid transparent;
+  border-radius: 6px 6px 0 0;
+  padding: 6px 14px;
+}
+
+.tabBtn.active {
+  color: #1f2937;
+  background: #f3f4f6;
+  border-color: #e5e7eb;
+  font-weight: 600;
+}
+
+.activityHint {
+  color: #6b7280;
+  font-size: 12.5px;
+}
+
+/* ---------- Activity log ---------- */
+
+.colTime {
+  width: 14%;
+  min-width: 96px;
+  white-space: nowrap;
+  color: #6b7280;
+  font-size: 12px;
+}
+.colEventType {
+  width: 13%;
+  min-width: 104px;
+}
+.colLabel {
+  width: 25%;
+  min-width: 160px;
+}
+.colDetail {
+  width: 34%;
+  min-width: 220px;
+}
+.colSite {
+  width: 14%;
+  min-width: 120px;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.eventBadge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 4px;
+  padding: 2px 7px;
+  white-space: nowrap;
+}
+
+.eventBadge.filled {
+  background: #dcfce7;
+  color: #15803d;
+}
+.eventBadge.saved {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+.eventBadge.recorded {
+  background: #eef2ff;
+  color: #4338ca;
+}
+.eventBadge.replay-attempt {
+  background: #fef9c3;
+  color: #854d0e;
+}
+.eventBadge.replay-success {
+  background: #dcfce7;
+  color: #15803d;
+}
+.eventBadge.replay-fail {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+.eventBadge.file-saved {
+  background: #e0f2fe;
+  color: #0369a1;
+}
+.eventBadge.file-fail {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+.eventBadge.oracle-fail {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+input.keyInput,
+input.aliasInput,
+textarea.valueInput,
+select.typeSelect {
+  width: 100%;
+  font: inherit;
+  padding: 6px 8px;
+  border: 1px solid #e5e7eb;
+  border-radius: 5px;
+  background: #fff;
+}
+
+textarea.valueInput {
+  resize: vertical;
+  min-height: 34px;
+}
+
+.fileValueEditor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.filePickerBtn {
+  grid-column: 1 / -1;
+  width: fit-content;
+  padding: 5px 9px;
+  color: #1f2937;
+  background: #fff;
+  border-color: #d1d5db;
+}
+
+.storedFileName {
+  overflow: hidden;
+  color: #374151;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.removeFileBtn {
+  padding: 3px 7px;
+  color: #b91c1c;
+  background: #fff;
+  border-color: #fecaca;
+  font-size: 11px;
+}
+
+.deleteBtn {
+  background: #fff;
+  color: #dc2626;
+  border-color: #fecaca;
+  padding: 6px 10px;
+}
+
+.empty {
+  color: #6b7280;
+  padding: 30px;
+  text-align: center;
+}
+
+/* ---------- Applications tab ---------- */
+
+#applicationsTable {
+  min-width: 940px;
+}
+
+.colCompany {
+  width: 16%;
+  min-width: 150px;
+}
+.colTitle {
+  width: 22%;
+  min-width: 190px;
+}
+.colStatus {
+  width: 13%;
+  min-width: 165px; /* room for a custom status like "Take-home sent" */
+}
+.colApplied {
+  width: 14%;
+  min-width: 150px;
+  color: #6b7280;
+  font-size: 12px;
+}
+.colNotes {
+  width: 22%;
+  min-width: 190px;
+}
+.colLink {
+  width: 10%;
+  min-width: 110px;
+}
+
+.statusSelect {
+  width: 100%;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 7px;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+
+.statusSelect.applied {
+  background: #dbeafe;
+  color: #1d4ed8;
+  border-color: #bfdbfe;
+}
+.statusSelect.saved {
+  background: #f3f4f6;
+  color: #4b5563;
+  border-color: #e5e7eb;
+}
+.statusSelect.interviewing {
+  background: #fef9c3;
+  color: #854d0e;
+  border-color: #fde68a;
+}
+.statusSelect.offer {
+  background: #dcfce7;
+  color: #15803d;
+  border-color: #bbf7d0;
+}
+.statusSelect.rejected {
+  background: #fee2e2;
+  color: #b91c1c;
+  border-color: #fecaca;
+}
+/* Anything the user made up shares one neutral colour. */
+.statusSelect.custom {
+  background: #eef2ff;
+  color: #4338ca;
+  border-color: #c7d2fe;
+}
+
+.appliedWhen {
+  display: block;
+}
+
+.appliedReq {
+  display: block;
+  color: #9ca3af;
+  font-size: 11px;
+}
+
+/* Truncate rather than wrap: a long host must not push Delete off the row.
+   The full URL stays available via the title attribute. */
+.appLink {
+  display: block;
+  color: #2563eb;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- Sites tab ---------- */
+
+.sitesPanel {
+  max-width: 640px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.siteModeGroup {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fff;
+  padding: 12px 14px;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.siteModeGroup legend {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #6b7280;
+  padding: 0 4px;
+}
+
+.siteModeGroup label {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  cursor: pointer;
+}
+
+.siteModeGroup input[type="radio"] {
+  margin-top: 3px;
+}
+
+.siteModeGroup span {
+  display: flex;
+  flex-direction: column;
+}
+
+.siteModeGroup small {
+  color: #6b7280;
+}
+
+.siteListBlock {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fff;
+  padding: 12px 14px;
+}
+
+.siteListBlock.inactive {
+  opacity: 0.55;
+}
+
+.siteListBlock h2 {
+  font-size: 14px;
+  margin: 0 0 2px;
+}
+
+.siteListNote {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.siteAddRow {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.siteAddRow input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  padding: 7px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+}
+
+.siteList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.siteList li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 10px;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+}
+
+.siteList .siteName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.siteList .siteRemove {
+  flex: none;
+  padding: 3px 9px;
+  font-size: 12px;
+  color: #b91c1c;
+  background: #fff;
+  border-color: #fecaca;
+}
+
+.siteListEmpty {
+  margin: 0;
+  font-size: 12px;
+  color: #9ca3af;
+}
+
+/* ---------- Large viewports ---------- */
+
+/* Keep the editor readable on a wide monitor instead of stretching columns
+   across the whole screen. */
+@media (min-width: 1200px) {
+  main {
+    max-width: 1180px;
+    margin: 0 auto;
+  }
+}
+
+/* ---------- Phones / narrow windows ---------- */
+
+@media (max-width: 600px) {
+  header {
+    padding: 12px 14px;
+  }
+  main {
+    padding: 14px 14px 44px;
+  }
+  h1 {
+    font-size: 16px;
+  }
+  .toolbar {
+    gap: 8px;
+  }
+  /* Search gets its own full-width row so the action buttons stay tappable. */
+  #search {
+    min-width: 0;
+    flex-basis: 100%;
+  }
+  .toggle {
+    margin-left: 0;
+  }
+  .tabBtn {
+    padding: 6px 10px;
+  }
+}
