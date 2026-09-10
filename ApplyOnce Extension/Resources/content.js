@@ -750,7 +750,11 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
           ? "change"
           : "input";
       var debounceT = null;
-      el.addEventListener(eventName, function () {
+      el.addEventListener(eventName, function (evt) {
+        // A real keystroke, paste, or clear hands ownership of this field to
+        // the user. Mark it now (isTrusted rules out our own synthetic fill
+        // events) so the next scan won't restore what they just backspaced.
+        if (evt && evt.isTrusted) el.dataset.jaaUserEdited = "1";
         clearTimeout(debounceT);
         debounceT = setTimeout(function () {
           if (isOraclePage()) {
@@ -785,6 +789,12 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
     }
 
     if (el.type === "file") return handleFileField(el, label, labelAliases, key);
+
+    // Once the user has typed into or cleared this field, it's theirs — never
+    // autofill it again this page visit. Without this, backspacing an
+    // autofilled value just gets it restored on the next scan, and the
+    // edit-save never wins the race.
+    if (el.dataset.jaaUserEdited) return false;
 
     var filled = false;
     var oracleDerivedValue = isOraclePage() ? getOracleDerivedNativeValue(state, el) : "";

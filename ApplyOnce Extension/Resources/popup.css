@@ -11,7 +11,17 @@ body {
 
 .wrap {
   width: 320px;
+  max-width: 100%;
   padding: 14px;
+}
+
+/* iOS Safari presents the popup as a full-width sheet — fill it instead of
+   leaving a 320px column. A desktop toolbar popup sizes its window to the
+   content, so its viewport never reaches this width and it stays at 320px. */
+@media (min-width: 360px) {
+  .wrap {
+    width: 100%;
+  }
 }
 
 h1 {
