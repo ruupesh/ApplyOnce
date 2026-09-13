@@ -3,6 +3,12 @@ var totalFieldsEl = document.getElementById("totalFields");
 var pageTotalEl = document.getElementById("pageTotal");
 var pageMatchedEl = document.getElementById("pageMatched");
 var pageUnmappedEl = document.getElementById("pageUnmapped");
+var pageFilledEl = document.getElementById("pageFilled");
+var pageEmptyEl = document.getElementById("pageEmpty");
+var filledSection = document.getElementById("filledSection");
+var filledList = document.getElementById("filledList");
+var emptySection = document.getElementById("emptySection");
+var emptyList = document.getElementById("emptyList");
 var unmappedSection = document.getElementById("unmappedSection");
 var unmappedList = document.getElementById("unmappedList");
 var siteHostEl = document.getElementById("siteHost");
@@ -337,12 +343,20 @@ async function requestPageSummary() {
     pageTotalEl.textContent = "0";
     pageMatchedEl.textContent = "0";
     pageUnmappedEl.textContent = "0";
+    pageFilledEl.textContent = "0";
+    pageEmptyEl.textContent = "0";
+    renderFieldStateList(filledSection, filledList, []);
+    renderFieldStateList(emptySection, emptyList, []);
     renderUnmappedList([]);
     return;
   }
   pageTotalEl.textContent = resp.total;
   pageMatchedEl.textContent = resp.mapped;
   pageUnmappedEl.textContent = resp.unmapped;
+  pageFilledEl.textContent = resp.filled || 0;
+  pageEmptyEl.textContent = resp.empty || 0;
+  renderFieldStateList(filledSection, filledList, resp.filledLabels || []);
+  renderFieldStateList(emptySection, emptyList, resp.emptyLabels || []);
   renderUnmappedList(resp.unmappedLabels || []);
 }
 
@@ -360,6 +374,16 @@ function renderUnmappedList(labels) {
     var li = document.createElement("li");
     li.textContent = label;
     unmappedList.appendChild(li);
+  });
+}
+
+function renderFieldStateList(section, list, labels) {
+  list.innerHTML = "";
+  section.hidden = labels.length === 0;
+  labels.forEach(function (label) {
+    var li = document.createElement("li");
+    li.textContent = label;
+    list.appendChild(li);
   });
 }
 

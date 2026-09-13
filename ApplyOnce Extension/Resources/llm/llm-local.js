@@ -1,0 +1,330 @@
+/*
+On-device provider, backed by Transformers.js.
+
+Two things are loaded lazily and separately, and the difference matters:
+
+  * the runtime (Transformers.js + the ONNX WebAssembly backend) ships inside
+    the extension, because MV3 forbids fetching and executing remote code. It
+    is vendored in only when you run `npm run vendor:llm`, so builds without it
+    stay small and this provider reports itself unavailable instead of breaking.
+
+  * the model weights are plain data, so they are downloaded on demand the
+    first time the user picks a model and then cached by the browser. Nothing
+    is fetched until the user asks for it.
+*/
+
+var JAA_LLM_VENDOR_PATH = "vendor/transformers/";
+
+var jaaLocalModule = null; // resolved Transformers.js namespace
+var jaaLocalPipeline = null; // { key, generator }
+var jaaLocalWorker = null;
+var jaaLocalRequest = 0;
+
+function jaaLocalIsQwen3(modelId) {
+  return /(?:^|[\/_-])qwen3(?:[\/_-]|$)/i.test(String(modelId || ""));
+}
+
+function jaaLocalIsDeepSeekR1Qwen(modelId) {
+  return /deepseek[\/_-]r1[\/_-]distill[\/_-]qwen/i.test(String(modelId || ""));
+}
+
+function jaaLocalPrefersQ4f16(modelId) {
+  return jaaLocalIsQwen3(modelId) || jaaLocalIsDeepSeekR1Qwen(modelId);
+}
+
+function jaaLocalRevision(modelId) {
+  // The repository's current q4f16 file reverted from GQA to a much heavier
+  // MHA export. ONNX Community recommends the parent revision when that export
+  // causes runtime problems. Pin it so a future upstream change cannot silently
+  // bring the incompatible graph back.
+  return jaaLocalIsDeepSeekR1Qwen(modelId)
+    ? "61425627ba20650f3540d034589d35f00514ba7c"
+    : "main";
+}
+
+function jaaLocalParameterBounds(modelId) {
+  return {
+    contextMin: 512,
+    contextMax: 65536,
+    outputMin: 16,
+    outputMax: 16384
+  };
+}
+
+function jaaLocalParameterDefaults(modelId) {
+  var qwen3 = jaaLocalIsQwen3(modelId);
+  var deepSeek = jaaLocalIsDeepSeekR1Qwen(modelId);
+  return {
+    contextWindow: qwen3 ? 8192 : 4096,
+    maxNewTokens: qwen3 ? 4096 : (deepSeek ? 512 : 256),
+    doSample: qwen3,
+    temperature: qwen3 || deepSeek ? 0.6 : 0.7,
+    topP: qwen3 || deepSeek ? 0.95 : 0.9,
+    topK: qwen3 || deepSeek ? 20 : 50,
+    repetitionPenalty: 1.1
+  };
+}
+
+function jaaLocalParameterSettings(modelId, overrides) {
+  var bounds = jaaLocalParameterBounds(modelId);
+  var defaults = jaaLocalParameterDefaults(modelId);
+  var source = overrides && typeof overrides === "object" ? overrides : {};
+  function number(name, min, max, integer) {
+    var value = typeof source[name] === "number" && isFinite(source[name]) ? source[name] : defaults[name];
+    value = Math.max(min, Math.min(max, value));
+    return integer ? Math.round(value) : Math.round(value * 100) / 100;
+  }
+  var contextWindow = number("contextWindow", bounds.contextMin, bounds.contextMax, true);
+  var outputMax = Math.max(bounds.outputMin, Math.min(bounds.outputMax, contextWindow - 128));
+  return {
+    contextWindow: contextWindow,
+    maxNewTokens: number("maxNewTokens", bounds.outputMin, outputMax, true),
+    doSample: typeof source.doSample === "boolean" ? source.doSample : defaults.doSample,
+    temperature: number("temperature", 0.01, 2, false),
+    topP: number("topP", 0.01, 1, false),
+    topK: number("topK", 0, 100, true),
+    repetitionPenalty: number("repetitionPenalty", 0.5, 2, false)
+  };
+}
+
+function jaaLocalGenerationOptions(modelId, overrides) {
+  var settings = jaaLocalParameterSettings(modelId, overrides);
+  var options = {
+    max_new_tokens: settings.maxNewTokens,
+    do_sample: settings.doSample,
+    repetition_penalty: settings.repetitionPenalty
+  };
+  if (settings.doSample) {
+    options.temperature = settings.temperature;
+    options.top_p = settings.topP;
+    options.top_k = settings.topK;
+  }
+  return options;
+}
+
+function jaaLocalFriendlyError(value, modelId) {
+  var detail = String(value || "The on-device model could not generate a reply.");
+  if (/std::bad_alloc|out of memory|failed to allocate|allocation failed/i.test(detail)) {
+    var name = jaaLocalIsDeepSeekR1Qwen(modelId) ? "DeepSeek R1 Qwen 1.5B" : "This model";
+    return name + " could not create an ONNX session in this browser. This can be a browser/export allocation limit even when the Mac has enough physical memory. Reload ApplyOnce and retry with WebGPU, or reduce the context window and output limit.";
+  }
+  if (/unaligned accesses/i.test(detail)) {
+    return "The browser ONNX backend could not execute this prompt. The model was unloaded safely; retry after reloading ApplyOnce or use a shorter prompt.";
+  }
+  return detail;
+}
+
+function jaaLocalRuntimeUrl(file) {
+  return jaaBrowser.runtime.getURL(JAA_LLM_VENDOR_PATH + file);
+}
+
+// True when the build was produced with `npm run vendor:llm`.
+async function isLocalRuntimeAvailable() {
+  try {
+    var response = await fetch(jaaLocalRuntimeUrl("transformers.min.js"), { method: "HEAD" });
+    return response.ok;
+  } catch (error) {
+    return false;
+  }
+}
+
+async function jaaLocalDevice() {
+  try {
+    if (typeof navigator !== "undefined" && navigator.gpu && await navigator.gpu.requestAdapter()) {
+      var runtime = await fetch(jaaLocalRuntimeUrl("ort-wasm-simd-threaded.asyncify.mjs"), { method: "HEAD" });
+      if (runtime.ok) return "webgpu";
+    }
+  } catch (error) { /* CPU fallback when no usable GPU adapter is available. */ }
+  return "wasm";
+}
+
+async function jaaLoadLocalModule() {
+  if (jaaLocalModule) return jaaLocalModule;
+  if (!(await isLocalRuntimeAvailable())) {
+    throw new Error(
+      "This version of ApplyOnce does not include on-device models. Choose an API provider or install a build with on-device support."
+    );
+  }
+  var module = await import(jaaLocalRuntimeUrl("transformers.min.js"));
+  // Point the runtime at the vendored wasm instead of its default CDN, which
+  // MV3's content security policy would block.
+  module.env.backends.onnx.wasm.wasmPaths = jaaBrowser.runtime.getURL(JAA_LLM_VENDOR_PATH);
+  module.env.backends.onnx.wasm.numThreads = 1;
+  module.env.allowLocalModels = false; // weights come from the Hub, then browser cache
+  module.env.useBrowserCache = true;
+  jaaLocalModule = module;
+  return module;
+}
+
+// Keeps one generator warm; switching model or precision rebuilds it.
+async function jaaGetLocalPipeline(modelId, dtype, onProgress) {
+  var device = await jaaLocalDevice();
+  if (device === "wasm" && dtype === "q4f16") dtype = "q4";
+  // The official Qwen3 and DeepSeek-R1-Distill-Qwen browser examples use
+  // q4f16. For DeepSeek 1.5B it is also about 600 MB smaller than q4; Qwen3's
+  // integer-only q4 graph can hit Dawn's unaligned-access shader validation.
+  if (device === "webgpu" && jaaLocalPrefersQ4f16(modelId)) dtype = "q4f16";
+  var revision = jaaLocalRevision(modelId);
+  var key = modelId + "|" + revision + "|" + dtype + "|" + device;
+  if (jaaLocalPipeline && jaaLocalPipeline.key === key) return jaaLocalPipeline.generator;
+
+  var module = await jaaLoadLocalModule();
+  await unloadLocalLlm();
+  var generator = await module.pipeline("text-generation", modelId, {
+    dtype: dtype,
+    device: device,
+    revision: revision,
+    progress_callback: function (report) {
+      if (!onProgress || report.status !== "progress" || !report.total) return;
+      onProgress({
+        file: report.file,
+        loaded: report.loaded,
+        total: report.total,
+        percent: Math.round((report.loaded / report.total) * 100)
+      });
+    }
+  });
+
+  jaaLocalPipeline = { key: key, generator: generator };
+  return generator;
+}
+
+async function unloadLocalLlm() {
+  if (jaaLocalWorker) {
+    jaaLocalWorker.terminate();
+    jaaLocalWorker = null;
+  }
+  var previous = jaaLocalPipeline;
+  jaaLocalPipeline = null;
+  if (previous) await previous.generator.dispose();
+}
+
+async function removeLocalModelDownload(modelId) {
+  await unloadLocalLlm();
+  if (typeof caches === "undefined") return;
+  if (!(await caches.keys()).includes("transformers-cache")) return;
+  var cache = await caches.open("transformers-cache");
+  var requests = await cache.keys();
+  await Promise.all(requests.filter(function (request) {
+    var url = new URL(request.url);
+    return url.hostname === "huggingface.co" && url.pathname.indexOf("/" + modelId + "/") === 0;
+  }).map(function (request) { return cache.delete(request); }));
+}
+
+async function jaaGenerateLocalLlm(options) {
+  if (options.signal) options.signal.throwIfAborted();
+  var parameterSettings = jaaLocalParameterSettings(options.model, options.parameters);
+  var generator = await jaaGetLocalPipeline(options.model, options.dtype || "q4", options.onProgress);
+  if (options.onProgress) options.onProgress({ status: "ready" });
+  if (options.signal) options.signal.throwIfAborted();
+  var module = await jaaLoadLocalModule();
+  var stopping = new module.InterruptableStoppingCriteria();
+  var interrupt = function () { stopping.interrupt(); };
+  if (options.signal) options.signal.addEventListener("abort", interrupt, { once: true });
+
+  var text = "";
+  var streamer = new module.TextStreamer(generator.tokenizer, {
+    skip_prompt: true,
+    skip_special_tokens: true,
+    callback_function: function (delta) {
+      text += delta;
+      if (options.onDelta) options.onDelta(delta);
+    }
+  });
+
+  // The pipeline applies the model's own chat template to this message list.
+  var recentMessages = typeof jaaLlmLocalMessages === "function" ? jaaLlmLocalMessages(options.messages) : options.messages;
+  var conversation = [{ role: "system", content: options.system }].concat(recentMessages);
+  try {
+    // Respect both the user's selected limit and the model architecture.
+    var generationOptions = jaaLocalGenerationOptions(options.model, parameterSettings);
+    var isQwen3 = jaaLocalIsQwen3(options.model);
+    var isDeepSeek = jaaLocalIsDeepSeekR1Qwen(options.model);
+    var fallbackWindow = isDeepSeek ? 131072 : (isQwen3 ? 40960 : 4096);
+    var configuredWindow = generator.model && generator.model.config.max_position_embeddings || fallbackWindow;
+    var contextWindow = Math.min(configuredWindow, parameterSettings.contextWindow);
+    generationOptions.max_new_tokens = Math.min(generationOptions.max_new_tokens, Math.max(16, contextWindow - 128));
+    var limit = contextWindow - generationOptions.max_new_tokens;
+    if (generator.tokenizer && generator.tokenizer.apply_chat_template) {
+      var countTokens = function () { return generator.tokenizer.apply_chat_template(conversation, { tokenize: true, add_generation_prompt: true }).length; };
+      while (countTokens() > limit && conversation.length > 2) {
+        conversation.splice(1, 1);
+        while (conversation.length > 2 && conversation[1].role !== "user") conversation.splice(1, 1);
+      }
+      if (countTokens() > limit) throw new Error("This message and its attachments exceed the local model's context limit. Shorten the message or turn off an attachment.");
+    }
+    await generator(conversation, Object.assign({}, generationOptions, {
+      streamer: streamer,
+      stopping_criteria: [stopping]
+    }));
+    if (options.signal) options.signal.throwIfAborted();
+    return text.trim();
+  } finally {
+    if (options.signal) options.signal.removeEventListener("abort", interrupt);
+  }
+}
+
+// Inference belongs in a worker so downloads and CPU generation never block
+// the editor. Terminating it also cancels downloads and frees model memory.
+function sendToLocalLlm(options) {
+  if (typeof window === "undefined") return jaaGenerateLocalLlm(options);
+  return new Promise(function (resolve, reject) {
+    if (options.signal && options.signal.aborted) return reject(new DOMException("Stopped.", "AbortError"));
+    if (!jaaLocalWorker) jaaLocalWorker = new Worker(jaaBrowser.runtime.getURL("llm/llm-worker.js"));
+    var worker = jaaLocalWorker;
+    var id = ++jaaLocalRequest;
+    function cleanup() {
+      worker.removeEventListener("message", receive);
+      worker.removeEventListener("error", failed);
+      if (options.signal) options.signal.removeEventListener("abort", abort);
+    }
+    function abort() {
+      cleanup();
+      unloadLocalLlm();
+      reject(new DOMException("Stopped.", "AbortError"));
+    }
+    function failed(event) {
+      cleanup();
+      unloadLocalLlm();
+      reject(new Error(event.message || "The on-device model could not start."));
+    }
+    function receive(event) {
+      var message = event.data;
+      if (message.id !== id) return;
+      if (message.type === "progress" && options.onProgress) options.onProgress(message.value);
+      if (message.type === "delta" && options.onDelta) options.onDelta(message.value);
+      if (message.type === "done" || message.type === "error") {
+        cleanup();
+        if (message.type === "error") {
+          unloadLocalLlm();
+          var detail = jaaLocalFriendlyError(message.value, options.model);
+          reject(new Error(detail));
+        }
+        else resolve(message.value);
+      }
+    }
+    worker.addEventListener("message", receive);
+    worker.addEventListener("error", failed);
+    if (options.signal) options.signal.addEventListener("abort", abort, { once: true });
+    worker.postMessage({
+      id: id,
+      model: options.model,
+      dtype: options.dtype,
+      parameters: options.parameters,
+      system: options.system,
+      messages: options.messages
+    });
+  });
+}
+
+if (typeof window !== "undefined") {
+  window.sendToLocalLlm = sendToLocalLlm;
+  window.jaaLocalGenerationOptions = jaaLocalGenerationOptions;
+  window.jaaLocalParameterBounds = jaaLocalParameterBounds;
+  window.jaaLocalParameterDefaults = jaaLocalParameterDefaults;
+  window.jaaLocalParameterSettings = jaaLocalParameterSettings;
+  window.jaaLocalFriendlyError = jaaLocalFriendlyError;
+  window.jaaLocalRevision = jaaLocalRevision;
+  window.isLocalRuntimeAvailable = isLocalRuntimeAvailable;
+  window.unloadLocalLlm = unloadLocalLlm;
+}

@@ -296,3 +296,31 @@ button.secondary {
 .unmappedList li:last-child {
   border-bottom: none;
 }
+
+.fieldStateHeader {
+  margin: 10px 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.fieldStateHeader.empty { color: #92400e; }
+.fieldStateHeader.filled { color: #166534; }
+
+.fieldStateList {
+  list-style: none;
+  margin: 0 0 4px;
+  padding: 0;
+  max-height: 130px;
+  overflow-y: auto;
+  border: 1px solid;
+  border-radius: 6px;
+}
+
+.fieldStateList.empty { border-color: #fde68a; background: #fffbeb; }
+.fieldStateList.filled { border-color: #bbf7d0; background: #f0fdf4; }
+.fieldStateList li { padding: 6px 9px; font-size: 12px; border-bottom: 1px solid currentColor; }
+.fieldStateList.empty li { color: #92400e; }
+.fieldStateList.filled li { color: #166534; }
+.fieldStateList li:last-child { border-bottom: none; }

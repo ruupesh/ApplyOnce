@@ -11,7 +11,7 @@
     "256": "images/icon-256.png",
     "512": "images/icon-512.png"
   },
-  "permissions": ["storage", "unlimitedStorage"],
+  "permissions": ["storage", "unlimitedStorage", "scripting"],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js"
@@ -33,5 +33,8 @@
   "options_ui": {
     "page": "options.html",
     "open_in_tab": true
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   }
 }

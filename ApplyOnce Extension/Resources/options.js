@@ -32,10 +32,12 @@ async function init() {
   Array.prototype.forEach.call(document.querySelectorAll(".tabBtn"), function (btn) {
     btn.addEventListener("click", function () {
       switchTab(btn.dataset.tab);
+      location.hash = btn.dataset.tab;
     });
   });
   // The popup deep-links here with options.html#applications.
   switchTab(tabFromHash() || "fields");
+  window.addEventListener("hashchange", function () { switchTab(tabFromHash() || "fields"); });
 
   Array.prototype.forEach.call(
     document.querySelectorAll('input[name="siteMode"]'),
@@ -69,18 +71,18 @@ function tabFromHash() {
   return document.querySelector('.tabBtn[data-tab="' + name + '"]') ? name : "";
 }
 
+// Every tab owns "<name>Section" and "<name>Toolbar". Deriving the ids from the
+// buttons keeps this from growing a line per tab, and tolerating missing nodes
+// means an optional feature (the Assistant) can be deleted without editing it.
 function switchTab(tab) {
   Array.prototype.forEach.call(document.querySelectorAll(".tabBtn"), function (btn) {
-    btn.classList.toggle("active", btn.dataset.tab === tab);
+    var name = btn.dataset.tab;
+    btn.classList.toggle("active", name === tab);
+    ["Section", "Toolbar"].forEach(function (suffix) {
+      var el = document.getElementById(name + suffix);
+      if (el) el.hidden = name !== tab;
+    });
   });
-  document.getElementById("fieldsSection").hidden = tab !== "fields";
-  document.getElementById("applicationsSection").hidden = tab !== "applications";
-  document.getElementById("activitySection").hidden = tab !== "activity";
-  document.getElementById("sitesSection").hidden = tab !== "sites";
-  document.getElementById("fieldsToolbar").hidden = tab !== "fields";
-  document.getElementById("applicationsToolbar").hidden = tab !== "applications";
-  document.getElementById("activityToolbar").hidden = tab !== "activity";
-  document.getElementById("sitesToolbar").hidden = tab !== "sites";
 }
 
 // ---------- Applications tab ----------
@@ -792,6 +794,7 @@ async function importJSON(e) {
 var EVENT_LABELS = {
   filled: "Filled",
   saved: "Saved",
+  "assistant-update": "Assistant update",
   "file-saved": "File saved",
   "file-fail": "File failed",
   "oracle-fail": "Oracle failed",

@@ -65,6 +65,20 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
         // blocking a site stops autofill, it shouldn't stop you logging that
         // you applied there.
         sendResponse(getApplicationContext());
+      } else if (msg.type === "JAA_GET_PAGE_TEXT") {
+        sendResponse(getReadablePageText());
+      } else if (msg.type === "JAA_AGENT_INSPECT_FORM") {
+        sendResponse(getAgentFormSnapshot());
+      } else if (msg.type === "JAA_AGENT_FILL_FORM") {
+        agentFillForm().then(sendResponse).catch(function (error) {
+          sendResponse({ ok: false, error: String((error && error.message) || error) });
+        });
+        return true;
+      } else if (msg.type === "JAA_AGENT_SET_FIELDS") {
+        agentSetFields(msg.fields).then(sendResponse).catch(function (error) {
+          sendResponse({ ok: false, error: String((error && error.message) || error) });
+        });
+        return true;
       }
       return false; // always responded synchronously above
     });
@@ -373,6 +387,38 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
     ]);
   }
 
+  // Workday repeats generic labels such as "Job Title" and "Month" for every
+  // experience row. Give the Assistant a stable, human-readable reference so
+  // it can target one row without changing every field with the same label.
+  function getAgentFieldRef(control, label) {
+    var scope = "";
+    var node = control;
+    for (var depth = 0; node && depth < 14; depth++, node = node.parentElement) {
+      if (node.getAttribute && node.getAttribute("role") === "group") {
+        var heading = node.querySelector("h5");
+        var headingText = heading ? cleanText(heading.textContent) : "";
+        if (/^(?:Work Experience|Education|Certifications|Languages)\s+\d+$/i.test(headingText)) {
+          scope = headingText;
+          break;
+        }
+      }
+    }
+
+    var detail = String(label || "").replace(/\*+\s*$/, "").trim();
+    if (/^(?:Month|Day|Year)$/i.test(detail) && control.closest) {
+      var dateContainer = control.closest('[data-automation-id^="formField-"]');
+      var dateLabel = dateContainer ? getContainerLabel(dateContainer).replace(/\*+\s*$/, "").trim() : "";
+      if (dateLabel && !/^(?:Month|Day|Year)$/i.test(dateLabel)) detail = dateLabel + " " + detail;
+    }
+    return slugify((scope ? scope + " " : "") + detail);
+  }
+
+  function findAgentFieldKey(st, control, label, aliases) {
+    var scopedKey = getAgentFieldRef(control, label);
+    if (scopedKey && st.fields && st.fields[scopedKey]) return scopedKey;
+    return findMatchingKeyForAliases(st, aliases);
+  }
+
   function findMatchingKeyForAliases(st, aliases) {
     for (var i = 0; i < aliases.length; i++) {
       var key = findMatchingKey(st, aliases[i]);
@@ -446,7 +492,7 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
     if (el.placeholder) return cleanText(el.placeholder);
     var nearby = findNearbyLabel(el);
     if (nearby) return nearby;
-    return humanize(el.name || el.id || "");
+    return humanize(el.name || el.getAttribute("data-automation-id") || el.id || "");
   }
 
   function getGroupLabel(radios) {
@@ -672,8 +718,53 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
     );
   }
 
+  function isWorkdayDateSectionInput(el) {
+    return !!(
+      el &&
+      /^(?:dateSectionMonth|dateSectionYear)-input$/.test(el.getAttribute("data-automation-id") || "") &&
+      el.parentElement
+    );
+  }
+
+  // Workday's segmented month/year control keeps its real value in React
+  // state. Assigning the nested input's value makes the date look filled but
+  // leaves that state empty, so validation later reports "From is required".
+  // Send the same key sequence the control handles for keyboard entry instead.
+  function setWorkdayDateSectionValue(el, value) {
+    var text = String(value == null ? "" : value).replace(/\D/g, "");
+    var section = el.parentElement;
+    if (!text || !section) return false;
+
+    if (section.focus) section.focus();
+    ["keydown", "keyup"].forEach(function (type) {
+      section.dispatchEvent(new KeyboardEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        key: "Backspace",
+        code: "Backspace",
+        keyCode: 8,
+        which: 8
+      }));
+    });
+    text.split("").forEach(function (character) {
+      ["keydown", "keypress", "keyup"].forEach(function (type) {
+        section.dispatchEvent(new KeyboardEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          key: character,
+          code: "Digit" + character,
+          keyCode: character.charCodeAt(0),
+          which: character.charCodeAt(0)
+        }));
+      });
+    });
+    if (section.blur) section.blur();
+    return Number(el.value) === Number(text);
+  }
+
   function setElementValue(el, value) {
     if (el.type === "file") return false;
+    if (isWorkdayDateSectionInput(el)) return setWorkdayDateSectionValue(el, value);
     if (el.tagName === "SELECT") {
       if (el.multiple) {
         var requested = Array.isArray(value)
@@ -740,7 +831,7 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
         el.type === "file"
           ? findMatchingFileKeyForAliases(state, labelAliases) ||
             findMatchingKeyForAliases(state, labelAliases)
-          : findMatchingKeyForAliases(state, labelAliases);
+          : findAgentFieldKey(state, el, label, labelAliases);
     }
 
     if (!el.dataset.jaaListener) {
@@ -1857,6 +1948,28 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
     if (opener.focus) opener.focus();
   }
 
+  function isWorkdayMultiSelectContainer(container, label) {
+    return !!(
+      container.querySelector(
+        '[data-automation-id="multiSelectContainer"], [data-automation-id="multiSelectInputContainer"], [role="listbox"][aria-label*="selected"]'
+      ) || /skills/i.test(String(label || ""))
+    );
+  }
+
+  function workdaySelectedValueMatches(current, wanted) {
+    var currentLabel = normalizeLabel(current);
+    var wantedLabel = normalizeLabel(wanted);
+    var parentheticalAliases = String(current || "").match(/\(([^)]+)\)/g) || [];
+    return !!(
+      wantedLabel &&
+      (currentLabel === wantedLabel ||
+        (currentLabel.indexOf(wantedLabel) === 0 && currentLabel.length <= wantedLabel.length + 40) ||
+        parentheticalAliases.some(function (part) {
+          return normalizeLabel(part.slice(1, -1)) === wantedLabel;
+        }))
+    );
+  }
+
   document.addEventListener(
     "click",
     function (e) {
@@ -1877,7 +1990,7 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
           if (recordingSession !== session) return; // superseded by a newer session
           if (newValue) {
             recordingSession = null;
-            var key = findMatchingKeyForAliases(state, session.labelAliases);
+            var key = findAgentFieldKey(state, session.container, session.label, session.labelAliases);
             saveFieldValue(
               key,
               session.label,
@@ -1949,6 +2062,76 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
 
     logActivity("replay-attempt", label, 'discovering path to "' + want + '"');
 
+    // Workday autocomplete and chip controls do not populate their portal
+    // until text is entered. execCommand follows the browser's editing path,
+    // which Workday observes; a synthetic InputEvent alone leaves Skills at
+    // "No Items." Fall back to the native setter elsewhere. The school picker
+    // additionally requires Enter per its own guidance.
+    var searchInput = container.querySelector('input:not([type]), input[type="text"], input[type="search"]');
+    if (searchInput) {
+      await closeOpenWorkdayMenu(container);
+      realClick(searchInput);
+      if (searchInput.focus) searchInput.focus();
+      var edited = false;
+      try {
+        var editToken = "jaa" + Date.now().toString(36) + Math.random().toString(36).slice(2);
+        searchInput.setAttribute("data-jaa-main-edit", editToken);
+        var mainEdit = await jaaBrowser.runtime.sendMessage({
+          type: "JAA_MAIN_REPLACE_TEXT",
+          token: editToken,
+          value: String(want)
+        });
+        searchInput.removeAttribute("data-jaa-main-edit");
+        edited = !!(mainEdit && mainEdit.ok && searchInput.value === String(want));
+      } catch (mainEditError) {
+        searchInput.removeAttribute("data-jaa-main-edit");
+      }
+      if (!edited) {
+        try {
+          if (searchInput.select) searchInput.select();
+          document.execCommand("delete", false);
+          edited = document.execCommand("insertText", false, String(want));
+        } catch (editingError) {}
+      }
+      if (!edited || searchInput.value !== String(want)) {
+        setNativeValue(searchInput, String(want));
+        try {
+          searchInput.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: String(want) }));
+        } catch (error) {
+          searchInput.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+      }
+      if (/school|university/i.test(label)) {
+        await sleep(120);
+        ["keydown", "keypress", "keyup"].forEach(function (type) {
+          searchInput.dispatchEvent(new KeyboardEvent(type, { bubbles: true, key: "Enter", code: "Enter", keyCode: 13, which: 13 }));
+        });
+      }
+      await sleep(1200);
+      var searchRows = await collectMenuRowsByScroll(3000);
+      var searchMatch = searchRows.find(function (row) {
+        return workdaySelectedValueMatches(row.text, want);
+      });
+      if (searchMatch) {
+        var searchTarget = await findMenuRowByScroll(searchMatch.text, 3000);
+        if (searchTarget) {
+          clickMenuRow(searchTarget);
+          var searchSelected = await waitForAsync(function () {
+            var values = readWorkdayContainerValue(container).split(",").map(function (value) { return normalizeLabel(value); });
+            return values.indexOf(normalizeLabel(searchMatch.text)) !== -1 ? readWorkdayContainerValue(container) : null;
+          }, 3000);
+          if (searchSelected) {
+            await learnFieldAliases(key, label, labelAliases);
+            logActivity("replay-success", label, searchMatch.text + "  ⇒  " + searchSelected);
+            return true;
+          }
+        }
+      }
+      await closeOpenWorkdayMenu(container);
+      logActivity("replay-fail", label, 'no autocomplete option matched "' + want + '"');
+      return false;
+    }
+
     while (queue.length && inspected < maxMenus) {
       var path = queue.shift();
       var pathKey = path.map(normalizeLabel).join(" > ");
@@ -1972,14 +2155,7 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
           }, 3000);
           if (selected) {
             var discoveredPath = path.concat(match.text);
-            await saveFieldValue(
-              key,
-              label,
-              selected,
-              "custom-widget",
-              discoveredPath,
-              labelAliases
-            );
+            await learnFieldAliases(key, label, labelAliases);
             logActivity("replay-success", label, discoveredPath.join(" → ") + "  ⇒  " + selected);
             return true;
           }
@@ -2016,16 +2192,43 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
 
     if (currentValue && currentValue !== lastSeen) {
       container.setAttribute(WORKDAY_LAST_VALUE_MARK, currentValue);
-      var key = findMatchingKeyForAliases(state, labelAliases);
-      saveFieldValue(key, label, currentValue, "custom-widget", null, labelAliases);
+      var key = findAgentFieldKey(state, container, label, labelAliases);
+      // A pre-filled site value is page state, not a profile edit. Preserve
+      // the user's reusable profile fact and only learn this site's aliases.
+      // A real user selection is saved by the recording listener above.
+      if (key) {
+        learnFieldAliases(key, label, labelAliases);
+      } else {
+        saveFieldValue(null, label, currentValue, "custom-widget", null, labelAliases);
+      }
       return false;
     }
 
-    var key2 = findMatchingKeyForAliases(state, labelAliases);
+    var key2 = findAgentFieldKey(state, container, label, labelAliases);
     if (!key2 || !state.fields[key2] || !state.fields[key2].value) return false;
     var field = state.fields[key2];
     var want = field.value;
     if (currentValue && currentValue.trim().toLowerCase() === String(want).trim().toLowerCase()) return false;
+    // Generic autofill fills blanks. Replacing an existing custom selection
+    // is reserved for an explicit, reviewed set_field action.
+    if (currentValue) return false;
+
+    // Background mutation scans only observe/save custom widgets. Opening a
+    // Workday menu steals keyboard focus, so filling is restricted to an
+    // explicit rescan or Assistant action.
+    if (!force) return false;
+
+    var isChipWidget = isWorkdayMultiSelectContainer(container, label);
+    if (isChipWidget) {
+      return queueCustomFill(container, async function () {
+        var values = String(want).split(",").map(function (part) { return part.trim(); }).filter(Boolean);
+        for (var valueIndex = 0; valueIndex < values.length; valueIndex++) {
+          var currentValues = readWorkdayContainerValue(container).split(",");
+          if (currentValues.some(function (current) { return workdaySelectedValueMatches(current, values[valueIndex]); })) continue;
+          await discoverAndFillNestedPath(container, key2, values[valueIndex], labelAliases);
+        }
+      }, force);
+    }
 
     if (field.recordedPath && field.recordedPath.length) {
       return queueCustomFill(container, async function () {
@@ -2040,13 +2243,6 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
     // records the path for every time after. Simple button-based
     // single-selects (e.g. "Country") are lower-risk, so still attempt the
     // type-and-match fallback for those specifically.
-    var isChipWidget = !!container.querySelector('[data-automation-id="multiSelectContainer"]');
-    if (isChipWidget) {
-      return queueCustomFill(container, function () {
-        return discoverAndFillNestedPath(container, key2, want, labelAliases);
-      }, force);
-    }
-
     return queueCustomFill(container, function () {
       return attemptFillWorkdaySingleSelect(container, want);
     }, force);
@@ -2078,7 +2274,7 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
     }
   }
 
-  function scanAndFill(force) {
+  function scanAndFill(force, nativeOnly) {
     if (!enabled && !force) return;
     var fields = getFormFields();
     var workdayContainers = getWorkdayFieldContainers();
@@ -2105,24 +2301,298 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
       if (handleRadioGroup(radios)) filledCount++;
     });
 
-    oraclePillRows.forEach(function (row) {
-      if (handleOraclePillRow(row)) filledCount++;
-    });
+    if (!nativeOnly) {
+      oraclePillRows.forEach(function (row) {
+        if (handleOraclePillRow(row)) filledCount++;
+      });
 
-    oracleComboboxes.forEach(function (input) {
-      if (handleOracleCombobox(input, force)) filledCount++;
-    });
+      oracleComboboxes.forEach(function (input) {
+        if (handleOracleCombobox(input, force)) filledCount++;
+      });
 
-    oracleMultiSelects.forEach(function (input) {
-      if (handleOracleMultiSelect(input, force)) filledCount++;
-    });
+      oracleMultiSelects.forEach(function (input) {
+        if (handleOracleMultiSelect(input, force)) filledCount++;
+      });
 
-    workdayContainers.forEach(function (container) {
-      if (handleWorkdayContainer(container, force)) filledCount++;
-    });
+      workdayContainers.forEach(function (container) {
+        if (handleWorkdayContainer(container, force)) filledCount++;
+      });
 
-    if (force && !isOraclePage()) handleCustomComboboxes();
+      if (force && !isOraclePage()) handleCustomComboboxes();
+    }
     if (filledCount > 0 || force) showBadge(filledCount);
+  }
+
+  function isRequiredControl(control, label) {
+    return !!(
+      (control && (control.required || control.getAttribute("aria-required") === "true")) ||
+      /\*\s*$/.test(String(label || ""))
+    );
+  }
+
+  // One shared inventory powers the popup counts, Assistant context, action
+  // review, and targeted edits, so all four agree about the page's state.
+  function getPageFieldInventory() {
+    var items = [];
+    function add(labelAliases, type, current, required, key, ref) {
+      var label = labelAliases[0];
+      if (!label || SENSITIVE_LABEL_RE.test(label)) return;
+      var matchedKey = key || findMatchingKeyForAliases(state, labelAliases);
+      var saved = matchedKey && state.fields[matchedKey] ? state.fields[matchedKey].value : "";
+      var value = current == null ? "" : String(current).trim();
+      items.push({
+        label: label,
+        ref: ref || slugify(label),
+        key: matchedKey || "",
+        type: type,
+        current: value.slice(0, 300),
+        saved: saved == null ? "" : String(saved).slice(0, 300),
+        required: !!required,
+        empty: !value,
+        fillable: !!saved && !value
+      });
+    }
+
+    getFormFields().forEach(function (el) {
+      if (el.type === "radio") return;
+      var aliases = getElementLabelAliases(el);
+      var label = aliases[0];
+      var key;
+      if (isOraclePage()) {
+        key = findOracleNativeKey(state, el, aliases);
+        if (el.type === "file") key = findMatchingFileKeyForAliases(state, aliases) || findOracleFileKey(state, aliases) || key;
+      } else {
+        key = el.type === "file"
+          ? findMatchingFileKeyForAliases(state, aliases) || findMatchingKeyForAliases(state, aliases)
+          : findAgentFieldKey(state, el, label, aliases);
+      }
+      var current = el.type === "file" ? (el.files && el.files[0] ? el.files[0].name : "") : getElementValue(el);
+      add(aliases, elementType(el), current, isRequiredControl(el, label), key, getAgentFieldRef(el, label));
+    });
+    getRadioGroups().forEach(function (radios) {
+      // Workday radio groups are also represented by their formField
+      // container below; count the logical question once.
+      if (isInsideCustomWidget(radios[0])) return;
+      var label = getGroupLabel(radios);
+      var aliases = uniqueLabelAliases(label, [radios[0].name]);
+      var key = findMatchingKeyForAliases(state, aliases);
+      var checked = radios.find(function (radio) { return radio.checked; });
+      add(aliases, "radio", checked ? cleanText(getLabelText(checked)) : "", radios.some(function (radio) { return isRequiredControl(radio, label); }), key, getAgentFieldRef(radios[0], label));
+    });
+    getOraclePillRows().forEach(function (row) {
+      var aliases = getOracleRowLabelAliases(row);
+      var selected = getOracleSelectedPill(row);
+      add(aliases, "custom-widget", selected ? cleanText(selected.textContent) : "", isRequiredControl(row, aliases[0]), findOraclePickerKey(state, aliases));
+    });
+    getOracleComboboxes().forEach(function (input) {
+      var aliases = getOracleComboboxLabelAliases(input);
+      add(aliases, "custom-widget", getOracleDateValue(input) || cleanText(input.value), isRequiredControl(input, aliases[0]), findOracleComboboxKey(state, input, aliases));
+    });
+    getOracleMultiSelects().forEach(function (input) {
+      var aliases = getOracleMultiLabelAliases(input);
+      add(aliases, "custom-widget", getOracleMultiSelectedValues(input).join(", "), isRequiredControl(input, aliases[0]));
+    });
+    getWorkdayFieldContainers().filter(function (container) {
+      return !isPlainNativeContainer(container);
+    }).forEach(function (container) {
+      var aliases = getContainerLabelAliases(container);
+      add(aliases, "custom-widget", readWorkdayContainerValue(container), isRequiredControl(container, aliases[0]), findAgentFieldKey(state, container, aliases[0], aliases), getAgentFieldRef(container, aliases[0]));
+    });
+
+    // Empty Workday repeatable sections contain no controls yet. Surface the
+    // section itself so Assistant can report that saved experience or
+    // education has not been added, and can offer it to Fill this form.
+    if (/myworkday(?:jobs|site)\.com$/i.test(location.hostname)) {
+      [
+        { heading: "Work Experience", prefix: "work_experience_" },
+        { heading: "Education", prefix: "education_" },
+        { heading: "Certifications", prefix: "certifications_" },
+        { heading: "Languages", prefix: "languages_" }
+      ].forEach(function (section) {
+        var heading = Array.prototype.find.call(document.querySelectorAll("h4"), function (candidate) {
+          return normalizeLabel(candidate.textContent) === normalizeLabel(section.heading);
+        });
+        if (!heading) return;
+        var group = heading.closest('[role="group"]');
+        var hasRows = group && Array.prototype.some.call(group.querySelectorAll("h5"), function (rowHeading) {
+          return new RegExp("^" + section.heading + "\\s+\\d+$", "i").test(cleanText(rowHeading.textContent));
+        });
+        if (hasRows) return;
+        var savedKey = Object.keys((state && state.fields) || {}).find(function (candidate) {
+          return candidate.indexOf(section.prefix) === 0 && state.fields[candidate] && state.fields[candidate].value;
+        });
+        add([section.heading], "repeatable-section", "", false, savedKey || null, slugify(section.heading));
+      });
+    }
+    return items.slice(0, 120);
+  }
+
+  // Read-only form plan for the Assistant. Current values are exposed only
+  // for non-sensitive fields and the form is never submitted.
+  function getAgentFormSnapshot() {
+    var items = getPageFieldInventory();
+    return { ok: true, title: document.title || location.hostname, url: location.href, fields: items.slice(0, 120) };
+  }
+
+  async function agentFillForm() {
+    state = await getState();
+    var before = getAgentFormSnapshot();
+    var savedPageFields = [];
+    var currentByRef = {};
+    before.fields.forEach(function (field) { currentByRef[field.ref] = field; });
+    var isWorkday = /myworkday(?:jobs|site)\.com$/i.test(location.hostname);
+    if (isWorkday) {
+      var includedFields = {};
+      Object.keys(state.fields || {}).forEach(function (key) {
+        if (!/^(?:work_experience|education)_\d+_/.test(key) && key !== "type_to_add_skills") return;
+        var field = state.fields[key];
+        if (!field || field.value == null || field.value === "") return;
+        var targetField = key;
+        if (/_current_job$/.test(targetField)) {
+          targetField = targetField.replace(/_current_job$/, "_i_currently_work_here");
+        } else if (/_currently_work_here$/.test(targetField) && !/_i_currently_work_here$/.test(targetField)) {
+          targetField = targetField.replace(/_currently_work_here$/, "_i_currently_work_here");
+        }
+        // The generic Fill action only fills blanks. An explicit set_field
+        // action can still replace a populated value after its normal review.
+        if ((currentByRef[targetField] && currentByRef[targetField].current) || includedFields[targetField]) return;
+        includedFields[targetField] = true;
+        savedPageFields.push({
+          field: targetField,
+          value: field.value
+        });
+      });
+    }
+    // Native text, checkbox, and radio controls still use the regular profile
+    // matcher. Workday custom widgets are handled only by the scoped actions
+    // below, avoiding races with their portaled menus.
+    scanAndFill(true, isWorkday);
+    if (savedPageFields.length) {
+      await agentSetFields(savedPageFields);
+    } else {
+      // Workday/Oracle/custom selects finish after their menus render.
+      await new Promise(function (resolve) { setTimeout(resolve, 1600); });
+    }
+    var after = getAgentFormSnapshot();
+    var filled = [];
+    var beforeByRef = {};
+    before.fields.forEach(function (field) { beforeByRef[field.ref] = field; });
+    after.fields.forEach(function (field) {
+      var old = beforeByRef[field.ref];
+      if ((!old || !old.current) && field.current) filled.push(field.label);
+    });
+    return { ok: true, title: after.title, url: after.url, filled: filled, filledCount: filled.length, fields: after.fields };
+  }
+
+  async function ensureWorkdayAgentSections(requested) {
+    var sections = [
+      { prefix: "work_experience_", heading: "Work Experience" },
+      { prefix: "education_", heading: "Education" },
+      { prefix: "certifications_", heading: "Certifications" },
+      { prefix: "languages_", heading: "Languages" }
+    ];
+    for (var sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
+      var section = sections[sectionIndex];
+      var wantedCount = 0;
+      requested.forEach(function (change) {
+        var match = String(change.field || "").match(new RegExp("^" + section.prefix + "(\\d+)_"));
+        if (match) wantedCount = Math.max(wantedCount, Number(match[1]));
+      });
+      if (!wantedCount) continue;
+
+      function rowCount() {
+        return Array.prototype.filter.call(document.querySelectorAll("h5"), function (heading) {
+          return new RegExp("^" + section.heading + "\\s+\\d+$", "i").test(cleanText(heading.textContent));
+        }).length;
+      }
+      while (rowCount() < wantedCount) {
+        var sectionHeading = Array.prototype.find.call(document.querySelectorAll("h4"), function (heading) {
+          return normalizeLabel(heading.textContent) === normalizeLabel(section.heading);
+        });
+        var group = sectionHeading && sectionHeading.closest('[role="group"]');
+        var addButton = group && group.querySelector('[data-automation-id="add-button"]');
+        if (!addButton) break;
+        var before = rowCount();
+        realClick(addButton);
+        var added = await waitForAsync(function () { return rowCount() > before; }, 5000);
+        if (!added) break;
+      }
+    }
+  }
+
+  async function agentSetFields(changes) {
+    state = await getState();
+    var requested = Array.isArray(changes) ? changes.slice(0, 30) : [];
+    var updated = [];
+    await ensureWorkdayAgentSections(requested);
+    getFormFields().forEach(function (el) {
+      if (el.type === "radio" || el.type === "file") return;
+      var aliases = getElementLabelAliases(el);
+      var label = aliases[0];
+      if (!label || SENSITIVE_LABEL_RE.test(label)) return;
+      var key = findAgentFieldKey(state, el, label, aliases);
+      var ref = getAgentFieldRef(el, label);
+      var match = requested.find(function (change) {
+        var wanted = normalizeLabel(change.field).replace(/\s+/g, "");
+        return wanted && ([ref, key].concat(aliases)).filter(Boolean).some(function (candidate) {
+          return normalizeLabel(candidate).replace(/\s+/g, "") === wanted;
+        });
+      });
+      if (!match) return;
+      delete el.dataset.jaaUserEdited;
+      el.setAttribute(FILLED_MARK, String(match.value));
+      if (setElementValue(el, match.value)) {
+        updated.push(label);
+        logActivity("filled", label, match.value);
+      }
+    });
+
+    // Target Workday's button/autocomplete widgets directly. This is needed
+    // for resume fields such as Degree, School, Languages, and Skills, whose
+    // visible controls are not native selects. Exact option matching remains
+    // mandatory; a different option is never chosen as a guess.
+    var workdayContainers = getWorkdayFieldContainers().filter(function (container) {
+      return !isPlainNativeContainer(container);
+    });
+    for (var i = 0; i < workdayContainers.length; i++) {
+      var container = workdayContainers[i];
+      var widgetAliases = getContainerLabelAliases(container);
+      var widgetLabel = widgetAliases[0];
+      var widgetRef = getAgentFieldRef(container, widgetLabel);
+      var widgetKey = findAgentFieldKey(state, container, widgetLabel, widgetAliases);
+      var widgetMatch = requested.find(function (change) {
+        var wanted = normalizeLabel(change.field).replace(/\s+/g, "");
+        return wanted && ([widgetRef, widgetKey].concat(widgetAliases)).filter(Boolean).some(function (candidate) {
+          return normalizeLabel(candidate).replace(/\s+/g, "") === wanted;
+        });
+      });
+      if (!widgetMatch) continue;
+
+      var before = readWorkdayContainerValue(container);
+      var isMulti = isWorkdayMultiSelectContainer(container, widgetLabel);
+      var values = isMulti
+        ? String(widgetMatch.value).split(",").map(function (part) { return part.trim(); }).filter(Boolean)
+        : [String(widgetMatch.value).trim()];
+      for (var valueIndex = 0; valueIndex < values.length; valueIndex++) {
+        var wantedValue = values[valueIndex];
+        var currentValues = readWorkdayContainerValue(container).split(",");
+        if (currentValues.some(function (current) { return workdaySelectedValueMatches(current, wantedValue); })) continue;
+        var selected = await discoverAndFillNestedPath(container, widgetMatch.field, wantedValue, widgetAliases);
+        if (!selected && !isMulti && before && readWorkdayContainerValue(container) !== before) {
+          await discoverAndFillNestedPath(container, widgetMatch.field, before, widgetAliases);
+        }
+      }
+      if (readWorkdayContainerValue(container) !== before) updated.push(widgetLabel);
+    }
+    // Custom widgets use their existing exact-match adapters after the saved
+    // profile values above have changed.
+    if (/myworkday(?:jobs|site)\.com$/i.test(location.hostname)) {
+      await new Promise(function (resolve) { setTimeout(resolve, 250); });
+    } else {
+      scanAndFill(true);
+      await new Promise(function (resolve) { setTimeout(resolve, 1600); });
+    }
+    return { ok: true, updated: updated, updatedCount: updated.length, fields: getPageFieldInventory() };
   }
 
   // ---------- Saving (fills the profile, including brand-new fields) ----------
@@ -2232,55 +2702,20 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
   // ---------- Popup support ----------
 
   function getPageSummary() {
-    var fields = getFormFields().filter(function (el) {
-      return el.type !== "radio";
-    });
-    var groups = getRadioGroups();
-    var oraclePillRows = getOraclePillRows();
-    var oracleComboboxes = getOracleComboboxes();
-    var oracleMultiSelects = getOracleMultiSelects();
-    var workdayContainers = getWorkdayFieldContainers().filter(function (c) {
-      return !isPlainNativeContainer(c);
-    });
-    var mapped = 0;
-    var unmapped = 0;
-    var unmappedLabels = [];
-
-    function classify(labelAliases) {
-      var label = labelAliases[0];
-      if (!label || SENSITIVE_LABEL_RE.test(label)) return;
-      if (findMatchingKeyForAliases(state, labelAliases)) {
-        mapped++;
-      } else {
-        unmapped++;
-        if (unmappedLabels.indexOf(label) === -1) unmappedLabels.push(label);
-      }
-    }
-
-    fields.forEach(function (el) {
-      classify(getElementLabelAliases(el));
-    });
-    groups.forEach(function (radios) {
-      classify(uniqueLabelAliases(getGroupLabel(radios), [radios[0].name]));
-    });
-    oraclePillRows.forEach(function (row) {
-      classify(getOracleRowLabelAliases(row));
-    });
-    oracleComboboxes.forEach(function (input) {
-      classify(getOracleComboboxLabelAliases(input));
-    });
-    oracleMultiSelects.forEach(function (input) {
-      classify(getOracleMultiLabelAliases(input));
-    });
-    workdayContainers.forEach(function (container) {
-      classify(getContainerLabelAliases(container));
-    });
+    var fields = getPageFieldInventory();
+    var mappedFields = fields.filter(function (field) { return !!field.key; });
+    var emptyFields = fields.filter(function (field) { return field.empty; });
+    var filledFields = fields.filter(function (field) { return !field.empty; });
 
     return {
-      total: mapped + unmapped,
-      mapped: mapped,
-      unmapped: unmapped,
-      unmappedLabels: unmappedLabels,
+      total: fields.length,
+      mapped: mappedFields.length,
+      unmapped: fields.length - mappedFields.length,
+      filled: filledFields.length,
+      empty: emptyFields.length,
+      filledLabels: filledFields.map(function (field) { return field.label; }),
+      emptyLabels: emptyFields.map(function (field) { return field.label; }),
+      unmappedLabels: fields.filter(function (field) { return !field.key; }).map(function (field) { return field.label; }),
       enabled: enabled
     };
   }
@@ -2399,6 +2834,22 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
       company: String(company || "").slice(0, 120),
       title: String(title || "").slice(0, 160),
       reqId: String(fromUrl.reqId || "").slice(0, 60)
+    };
+  }
+
+  // ---------- Page text, for the assistant ----------
+  //
+  // Only runs when the user explicitly attaches "This page" in the Assistant
+  // tab — never on its own. Uses innerText so it sees what the user sees:
+  // hidden nodes, scripts, and styles are excluded for free.
+
+  function getReadablePageText() {
+    var root = document.querySelector("main, article, [role='main']") || document.body;
+    var text = root ? root.innerText || "" : "";
+    return {
+      title: document.title || "",
+      url: location.href,
+      text: text.replace(/\n{3,}/g, "\n\n").trim().slice(0, 20000)
     };
   }
 

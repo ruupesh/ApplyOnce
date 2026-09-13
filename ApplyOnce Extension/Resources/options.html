@@ -14,6 +14,7 @@
     <button class="tabBtn" data-tab="applications">Applications</button>
     <button class="tabBtn" data-tab="activity">Activity Log</button>
     <button class="tabBtn" data-tab="sites">Sites</button>
+    <button class="tabBtn" data-tab="assistant">Assistant</button>
   </nav>
   <div class="toolbar" id="fieldsToolbar">
     <input id="search" type="search" aria-label="Search fields" placeholder="Search fields..." />
@@ -53,6 +54,17 @@
   </div>
   <div class="toolbar" id="sitesToolbar" hidden>
     <span class="activityHint">Choose where ApplyOnce is allowed to fill forms.</span>
+  </div>
+  <div class="toolbar" id="assistantToolbar" hidden>
+    <label class="inlineField">
+      Provider
+      <select id="llmProvider"></select>
+    </label>
+    <label class="inlineField">
+      Model
+      <select id="llmModel"></select>
+    </label>
+    <button id="llmKeysBtn" class="secondary">API keys</button>
   </div>
 </header>
 
@@ -181,9 +193,121 @@
       </div>
     </div>
   </section>
+
+  <!-- Assistant: everything for this feature lives in llm/ plus this section. -->
+  <section id="assistantSection" hidden>
+    <div class="assistant">
+      <p class="llmPrivacy" id="llmPrivacy"></p>
+      <p class="llmModelInfo" id="llmModelInfo"></p>
+      <button type="button" class="secondary llmRemoveModel" id="llmRemoveModel">Remove selected model download</button>
+
+      <details class="llmParameters" id="llmParameters">
+        <summary>Model parameters</summary>
+        <div class="llmParameterGrid">
+          <label>
+            Context window
+            <input type="number" id="llmContextWindow" min="512" step="128" inputmode="numeric" />
+            <small>Maximum prompt and reply tokens held by the local model.</small>
+          </label>
+          <label>
+            Output limit
+            <input type="number" id="llmMaxNewTokens" min="16" step="16" inputmode="numeric" />
+            <small>Maximum new tokens generated for one response.</small>
+          </label>
+          <label>
+            Temperature
+            <input type="number" id="llmTemperature" min="0.01" max="2" step="0.01" inputmode="decimal" />
+            <small>Higher values make sampled responses more varied.</small>
+          </label>
+          <label>
+            Top P
+            <input type="number" id="llmTopP" min="0.01" max="1" step="0.01" inputmode="decimal" />
+            <small>Limits sampling to the most likely token mass.</small>
+          </label>
+          <label>
+            Top K
+            <input type="number" id="llmTopK" min="0" max="100" step="1" inputmode="numeric" />
+            <small>Limits sampling to the most likely token choices.</small>
+          </label>
+          <label>
+            Repetition penalty
+            <input type="number" id="llmRepetitionPenalty" min="0.5" max="2" step="0.01" inputmode="decimal" />
+            <small>Values above 1 reduce repeated text.</small>
+          </label>
+        </div>
+        <label class="llmSamplingToggle">
+          <input type="checkbox" id="llmDoSample" />
+          Use sampling
+        </label>
+        <div class="llmParameterFooter">
+          <button type="button" class="secondary" id="llmResetParameters">Reset model defaults</button>
+          <span id="llmParameterStatus" role="status"></span>
+        </div>
+      </details>
+
+      <div class="llmKeys" id="llmKeysPanel" hidden></div>
+
+      <div class="llmAttach">
+        <span class="llmAttachLabel">Attach</span>
+        <div class="llmChips" id="llmChips"></div>
+      </div>
+      <label class="llmPageRow" id="llmPageRow" hidden>
+        Page to inspect
+        <select id="llmPageSelect" aria-label="Page to attach"></select>
+      </label>
+
+      <div class="llmChatHeader">
+        <h2>Conversation</h2>
+        <div>
+          <button type="button" id="llmUndoClearBtn" class="secondary" hidden>Undo clear</button>
+          <button type="button" id="llmClearBtn" class="secondary">Clear chat</button>
+        </div>
+      </div>
+      <p id="llmChatStatus" class="llmModelInfo" role="status" hidden></p>
+      <div class="llmTranscript" id="llmTranscript" role="log" aria-label="Conversation" aria-live="polite">
+        <div class="llmEmpty" id="llmEmpty">
+          <h2>Ask about your applications</h2>
+          <p>
+            Draft an answer to an application question, tailor it to a company,
+            shorten it to fit a limit, or write a follow-up email — grounded in
+            the profile and applications you have already saved.
+          </p>
+          <p class="llmEmptyHint">
+            Pick <strong>On-device</strong> to download a small model that runs
+            entirely on your machine, or add an API key for a hosted model.
+          </p>
+        </div>
+      </div>
+
+      <div class="llmProgress" id="llmProgress" role="status" hidden>
+        <div class="llmProgressBar"><span id="llmProgressFill"></span></div>
+        <span class="llmProgressText" id="llmProgressText"></span>
+      </div>
+
+      <div class="llmPrompts" id="llmPrompts"></div>
+
+      <form class="llmComposer" id="llmComposer">
+        <textarea
+          id="llmInput"
+          aria-label="Message to assistant"
+          rows="2"
+          placeholder="Ask anything about your job search…"
+        ></textarea>
+        <button type="submit" id="llmSendBtn">Send</button>
+      </form>
+    </div>
+  </section>
 </main>
 
 <script src="storage.js"></script>
 <script src="options.js"></script>
+<script src="llm/llm-store.js"></script>
+<script src="llm/llm-resume.js"></script>
+<script src="llm/llm-tools.js"></script>
+<script src="llm/llm-agent.js"></script>
+<script src="llm/llm-format.js"></script>
+<script src="llm/llm-local.js"></script>
+<script src="llm/llm-providers.js"></script>
+<script src="llm/llm-ui.js"></script>
 </body>
 </html>

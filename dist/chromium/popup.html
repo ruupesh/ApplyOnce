@@ -51,6 +51,24 @@
           <span>Unmapped</span>
           <strong id="pageUnmapped">-</strong>
         </div>
+        <div class="row good">
+          <span>Filled</span>
+          <strong id="pageFilled">-</strong>
+        </div>
+        <div class="row warn">
+          <span>Empty</span>
+          <strong id="pageEmpty">-</strong>
+        </div>
+      </div>
+
+      <div id="emptySection" hidden>
+        <div class="fieldStateHeader empty">Empty fields on this page</div>
+        <ul id="emptyList" class="fieldStateList empty"></ul>
+      </div>
+
+      <div id="filledSection" hidden>
+        <div class="fieldStateHeader filled">Filled fields on this page</div>
+        <ul id="filledList" class="fieldStateList filled"></ul>
       </div>
 
       <div id="unmappedSection" hidden>

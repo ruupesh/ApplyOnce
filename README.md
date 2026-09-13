@@ -62,9 +62,36 @@ Leave resource copying disabled in the converter prompts. Configure signing for 
 
 ## Privacy
 
-Profile fields, activity history, and selected resume bytes remain in local extension storage. ApplyOnce has no network service and does not send profile data to the containing app. Password, government-ID, payment, and banking fields are explicitly excluded.
+Profile fields, activity history, and selected resume bytes remain in local extension storage. Local assistant models run on the device; their weights download from Hugging Face on first use. Choosing an API provider sends the conversation and selected attachments directly to that provider. API keys and chat are stored separately from the profile and excluded from Export JSON. ApplyOnce does not send profile data to the containing app. Password, government-ID, payment, and banking fields are excluded from automatic field learning.
 
 Keep real exported profiles and resumes in the ignored `LocalData/` directory, never in `Resources` or `Samples`.
+
+## Assistant
+
+Open the full editor's **Assistant** tab. Choose an on-device model or add an OpenAI, Groq, DeepSeek, Claude, or Gemini API key. Models download only when you send the first message. Expand **Model parameters** to set a per-model context window up to 65,536 tokens, an output limit up to 16,384 tokens, sampling mode, temperature, top-p, top-k, and repetition penalty, or restore that model's defaults. The runtime also respects the selected model's architectural context limit. **Stop** cancels local loading/generation; **Remove selected model download** frees its cached files. Smaller models can be repetitive or inaccurate; review drafts before using them.
+
+**Clear chat** sits directly above the conversation and can stop an in-progress reply before clearing. **Undo clear** restores the previous conversation while that editor remains open. Clearing does not remove profile fields, API keys, or model downloads. Reload any editor tabs left open during a rebuild so they run the updated code.
+
+Attach saved profile fields, a resume, tracked applications, or a specific web tab. Page context reads visible text, not screenshots. PDF text extraction requires the optional reader below; DOCX and text resumes use browser APIs. Scanned PDFs need a text version. Attachments and older conversation turns are bounded to fit small models. See [Assistant implementation and validation](Documentation/Assistant.md).
+
+The Assistant can also prepare profile and form actions from chat. For example, ask `Set my preferred name to Sam` or `Set my preferred name to Sam and fill this form`. It presents the exact old/new profile values and target page in a review card. Nothing changes until **Apply actions** is clicked. Form actions fill matching empty fields, exclude sensitive inputs, preserve values already typed by the user, and never submit the form. Reload application tabs after rebuilding or reloading an unpacked extension so their content scripts reconnect.
+
+The popup reports matched/unmapped and filled/empty counts, with field-name lists for each page state. The Assistant receives the same non-sensitive inventory. Natural edits such as `In address line 2, add Baner` resolve against that exact field and show a review card. Clicking **Apply actions** or replying `update the field` confirms the pending edit. Confirmed edits update the saved profile and the matching control on the selected page; the saved value is available for future page loads.
+
+Pasting a resume with standard `PROFILE SUMMARY`, `SKILLS`, `WORK EXPERIENCE`, and `EDUCATION` headings creates deterministic, reviewable actions without asking the local model to reinterpret those facts. **Fill this form** can create the missing Workday experience and education rows, commits Workday's segmented date controls through their keyboard interface, and only fills blank fields. Repeated rows use scoped names such as `Work Experience 2 Job Title`, so one update cannot overwrite another row. Questions such as `which fields are missing on this page?` are answered from the live form inventory rather than a model guess.
+
+Qwen3 ONNX models run in their default reasoning mode with sampling suited to that model family and a browser-safe 4,096-token reply budget. ApplyOnce uses the supported `q4f16` WebGPU graph for Qwen3 and DeepSeek-R1-Distill-Qwen. DeepSeek 1.5B is pinned to the repository's GQA revision (`6142562`) because the later MHA export can fail while ONNX creates its browser session even when the computer has ample physical memory. Recent local-model history is bounded, **Reasoning…** replaces visible `<think>` content while the model works, and final responses render as safe Markdown. Add `/no_think` to a Qwen3 prompt when a fast direct answer is more useful.
+
+The default checkout has no model weights or inference binaries. To prepare a build with local models and PDF resume reading:
+
+```bash
+npm install --no-save @huggingface/transformers@4.2.0 pdfjs-dist@6.3.289
+npm run vendor:llm
+npm run vendor:resume
+npm run build:chromium
+```
+
+Reload ApplyOnce in `chrome://extensions` after rebuilding. The vendored GPU + CPU runtime adds about 35.4 MiB; the PDF reader adds about 1.8 MB. Both vendor directories are gitignored. Use `npm run vendor:llm -- --cpu` for a smaller CPU-only runtime. A build without the runtime still supports API-key providers. API adapters use native `fetch` without an SDK or LangChain dependency.
 
 ## Validation
 

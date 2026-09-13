@@ -6,7 +6,10 @@
   "scripts": {
     "build:chromium": "node scripts/build-extension.js",
     "package:chromium": "npm run build:chromium && cd dist/chromium && zip -qr ../ApplyOnce-chromium.zip .",
-    "test": "node --test tests/extension.test.js"
+    "test": "node --test tests/extension.test.js",
+    "vendor:llm": "node scripts/vendor-llm.js",
+    "vendor:resume": "node scripts/vendor-resume.js",
+    "vendor:llm:clean": "rm -rf 'ApplyOnce Extension/Resources/vendor/transformers'"
   },
   "engines": {
     "node": ">=18"

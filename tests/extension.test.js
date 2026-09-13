@@ -86,6 +86,7 @@ test("shared Safari and Chromium manifest uses portable settings", () => {
   assert.equal(manifest.version, "1.3.1");
   assert.deepEqual(manifest.host_permissions, ["<all_urls>"]);
   assert.ok(manifest.permissions.includes("storage"));
+  assert.ok(manifest.permissions.includes("scripting"));
   assert.equal(manifest.background.service_worker, "background.js");
   assert.equal("persistent" in manifest.background, false);
   assert.deepEqual(manifest.content_scripts[0].js, ["storage.js", "content.js"]);
@@ -400,6 +401,12 @@ test("popup messaging and Safari editor fallback use Promise APIs", async () => 
     "pageTotal",
     "pageMatched",
     "pageUnmapped",
+    "pageFilled",
+    "pageEmpty",
+    "filledSection",
+    "filledList",
+    "emptySection",
+    "emptyList",
     "unmappedSection",
     "unmappedList",
     "rescanBtn",
@@ -446,7 +453,7 @@ test("popup messaging and Safari editor fallback use Promise APIs", async () => 
       async sendMessage(tabId, message) {
         messages.push({ tabId, message });
         if (message.type === "JAA_GET_PAGE_SUMMARY") {
-          return { total: 3, mapped: 2, unmapped: 1, unmappedLabels: ["Portfolio"] };
+          return { total: 3, mapped: 2, unmapped: 1, filled: 2, empty: 1, filledLabels: ["Name", "Email"], emptyLabels: ["Portfolio"], unmappedLabels: ["Portfolio"] };
         }
         if (message.type === "JAA_GET_APPLICATION_CONTEXT") {
           return {
@@ -513,6 +520,10 @@ test("popup messaging and Safari editor fallback use Promise APIs", async () => 
   assert.equal(elements.pageTotal.textContent, 3);
   assert.equal(elements.pageMatched.textContent, 2);
   assert.equal(elements.pageUnmapped.textContent, 1);
+  assert.equal(elements.pageFilled.textContent, 2);
+  assert.equal(elements.pageEmpty.textContent, 1);
+  assert.equal(elements.filledList.children[0].textContent, "Name");
+  assert.equal(elements.emptyList.children[0].textContent, "Portfolio");
   assert.equal(elements.unmappedList.children[0].textContent, "Portfolio");
 
   // Per-site card reflects the active tab and offers a one-click block.
@@ -605,4 +616,429 @@ test("runtime scripts use the shared WebExtensions API namespace", () => {
     const source = fs.readFileSync(path.join(resourcesRoot, file), "utf8");
     assert.doesNotMatch(source, /\bchrome\.(?:runtime|storage|tabs)\b/, file);
   }
+});
+
+function loadLlmScript(name, extra = {}) {
+  const context = vm.createContext({ TextDecoder, Uint8Array, AbortController, ...extra });
+  vm.runInContext(fs.readFileSync(path.join(resourcesRoot, 'llm', name), 'utf8'), context);
+  return context;
+}
+
+test('local model replacement releases the previous pipeline', async () => {
+  const calls = [];
+  const ctx = loadLlmScript('llm-local.js');
+  ctx.jaaLocalDevice = async () => 'wasm';
+  ctx.jaaLoadLocalModule = async () => ({ pipeline: async (task, model, options) => {
+    calls.push([model, options.dtype]);
+    return { dispose: async () => calls.push('disposed') };
+  } });
+  await ctx.jaaGetLocalPipeline('first', 'q4f16');
+  await ctx.jaaGetLocalPipeline('first', 'q4f16');
+  await ctx.jaaGetLocalPipeline('second', 'q4f16');
+  assert.deepEqual(calls, [['first', 'q4'], 'disposed', ['second', 'q4']]);
+});
+
+test('Qwen3 and DeepSeek R1 Qwen use their supported q4f16 graphs on WebGPU', async () => {
+  const calls = [];
+  const ctx = loadLlmScript('llm-local.js');
+  ctx.jaaLocalDevice = async () => 'webgpu';
+  ctx.jaaLoadLocalModule = async () => ({ pipeline: async (task, model, options) => {
+    calls.push([model, options.dtype, options.device, options.revision]);
+    return { dispose: async () => {} };
+  } });
+  await ctx.jaaGetLocalPipeline('onnx-community/Qwen3-0.6B-ONNX', 'q4');
+  await ctx.jaaGetLocalPipeline('onnx-community/DeepSeek-R1-Distill-Qwen-1.5B-ONNX', 'q4');
+  assert.deepEqual(calls, [
+    ['onnx-community/Qwen3-0.6B-ONNX', 'q4f16', 'webgpu', 'main'],
+    ['onnx-community/DeepSeek-R1-Distill-Qwen-1.5B-ONNX', 'q4f16', 'webgpu', '61425627ba20650f3540d034589d35f00514ba7c']
+  ]);
+});
+
+test('Qwen3 uses thinking-mode sampling with a browser-safe output budget', () => {
+  const ctx = loadLlmScript('llm-local.js');
+  const qwen3 = ctx.jaaLocalGenerationOptions('onnx-community/Qwen3-0.6B-ONNX');
+  assert.equal(qwen3.max_new_tokens, 4096);
+  assert.equal(qwen3.do_sample, true);
+  assert.equal(qwen3.temperature, 0.6);
+  assert.equal(qwen3.top_p, 0.95);
+  assert.equal(qwen3.top_k, 20);
+  assert.deepEqual({...ctx.jaaLocalGenerationOptions('onnx-community/Qwen2.5-0.5B-Instruct')}, {
+    max_new_tokens: 256, do_sample: false, repetition_penalty: 1.1
+  });
+});
+
+test('local model parameters allow 64K context and 16K output', () => {
+  const ctx = loadLlmScript('llm-local.js');
+  const model = 'onnx-community/Qwen3-0.6B-ONNX';
+  assert.deepEqual({...ctx.jaaLocalParameterBounds(model)}, {
+    contextMin: 512, contextMax: 65536, outputMin: 16, outputMax: 16384
+  });
+  assert.deepEqual({...ctx.jaaLocalParameterSettings(model, {
+    contextWindow: 70000,
+    maxNewTokens: 20000,
+    doSample: false,
+    temperature: 9,
+    topP: -1,
+    topK: 900,
+    repetitionPenalty: 0
+  })}, {
+    contextWindow: 65536,
+    maxNewTokens: 16384,
+    doSample: false,
+    temperature: 2,
+    topP: 0.01,
+    topK: 100,
+    repetitionPenalty: 0.5
+  });
+  assert.deepEqual({...ctx.jaaLocalGenerationOptions(model, {doSample:false,maxNewTokens:512})}, {
+    max_new_tokens: 512, do_sample: false, repetition_penalty: 1.1
+  });
+  const deepSeek = 'onnx-community/DeepSeek-R1-Distill-Qwen-1.5B-ONNX';
+  assert.equal(ctx.jaaLocalParameterDefaults(deepSeek).maxNewTokens, 512);
+  assert.equal(ctx.jaaLocalParameterDefaults(deepSeek).doSample, false);
+  assert.match(ctx.jaaLocalFriendlyError("Can't create a session. ERROR_MESSAGE: std::bad_alloc", deepSeek), /browser\/export allocation limit/i);
+  assert.equal(ctx.jaaLocalRevision(deepSeek), '61425627ba20650f3540d034589d35f00514ba7c');
+});
+
+test('reasoning is separated from the final answer and unfinished thinking is detected', () => {
+  const ctx = loadLlmScript('llm-format.js');
+  const complete = ctx.jaaLlmSplitReasoning('<think>Private analysis</think>\n\n## Missing fields\n- Phone');
+  assert.equal(complete.reasoning, 'Private analysis');
+  assert.equal(complete.answer, '## Missing fields\n- Phone');
+  assert.equal(complete.incomplete, false);
+  const unfinished = ctx.jaaLlmSplitReasoning('<think>Still working');
+  assert.equal(unfinished.answer, '');
+  assert.equal(unfinished.thinking, true);
+  assert.equal(unfinished.incomplete, true);
+});
+
+test('assistant Markdown creates safe formatting nodes without executable HTML', () => {
+  class FakeNode {
+    constructor(name, text = '') { this.nodeName = name; this.children = []; this._text = text; }
+    appendChild(child) { this.children.push(child); return child; }
+    set textContent(value) { this._text = String(value); this.children = []; }
+    get textContent() { return this._text + this.children.map(child => child.textContent).join(''); }
+  }
+  const document = {
+    createElement: name => new FakeNode(name.toUpperCase()),
+    createTextNode: text => new FakeNode('#text', text)
+  };
+  const ctx = loadLlmScript('llm-format.js', {document});
+  const container = new FakeNode('DIV');
+  ctx.jaaRenderMarkdown(container, '## Result\n\n- **Name**\n- [Safe](https://example.com)\n- [Unsafe](javascript:alert(1))\n\n<script>alert(1)</script>');
+  assert.deepEqual(container.children.map(node => node.nodeName), ['H2', 'UL', 'P']);
+  assert.equal(container.children[1].children[0].children[0].nodeName, 'STRONG');
+  assert.equal(container.children[1].children[1].children[0].nodeName, 'A');
+  assert.match(container.textContent, /<script>alert\(1\)<\/script>/);
+  assert.equal(container.children.some(node => node.nodeName === 'SCRIPT'), false);
+});
+
+test('local generation observes cancellation before loading and during generation', async () => {
+  const controller = new AbortController();
+  const ctx = loadLlmScript('llm-local.js');
+  let interrupted = false;
+  ctx.jaaGetLocalPipeline = async () => async () => controller.abort();
+  ctx.jaaLoadLocalModule = async () => ({
+    TextStreamer: class {},
+    InterruptableStoppingCriteria: class { interrupt() { interrupted = true; } }
+  });
+  await assert.rejects(ctx.sendToLocalLlm({ model: 'test', messages: [], signal: controller.signal }), { name: 'AbortError' });
+  assert.equal(interrupted, true);
+  ctx.jaaGetLocalPipeline = () => { throw new Error('must not load'); };
+  await assert.rejects(ctx.sendToLocalLlm({ signal: controller.signal }), { name: 'AbortError' });
+});
+
+test('resume context decodes UTF-8 text', async () => {
+  const ctx = loadLlmScript('llm-tools.js', {
+    atob,
+    getState: async () => ({ fields: { resume: { type: 'file' } } }),
+    getStoredFile: async () => ({ name: 'resume.txt', type: 'text/plain', data: Buffer.from('José — résumé').toString('base64') })
+  });
+  vm.runInContext(fs.readFileSync(path.join(resourcesRoot, 'llm/llm-resume.js'), 'utf8'), ctx);
+  assert.match(await ctx.jaaLlmResumeContext(), /José — résumé/);
+});
+
+test('provider streams handle split UTF-8, multiple data lines, and a final frame without newline', async () => {
+  const encoded = new TextEncoder().encode('data: {"text":\ndata: "résumé"}\r\n\r\ndata: {"text":"done"}');
+  const ctx = loadLlmScript('llm-providers.js');
+  const events = [];
+  const body = new ReadableStream({ start(controller) {
+    for (const byte of encoded) controller.enqueue(Uint8Array.of(byte));
+    controller.close();
+  } });
+  await ctx.jaaLlmReadSSE({ body }, event => events.push(event.text));
+  assert.deepEqual(events, ['résumé', 'done']);
+});
+
+test('provider errors inside a successful HTTP stream remain visible', async () => {
+  const ctx = loadLlmScript('llm-providers.js');
+  await assert.rejects(ctx.jaaLlmReadSSE(new Response('data: {"error":{"message":"Quota exceeded"}}\n\n'), () => {}), /Quota exceeded/);
+});
+
+test('all five provider adapters build requests and extract streamed responses', async () => {
+  for (const provider of ['openai', 'groq', 'deepseek', 'anthropic', 'gemini']) {
+    const ctx = loadLlmScript('llm-store.js');
+    ctx.fetch = async (url, request) => {
+      assert.ok(!url.includes('test-key'));
+      const body = JSON.parse(request.body);
+      if (provider === 'gemini') {
+        assert.equal(request.headers['x-goog-api-key'], 'test-key');
+        assert.equal(body.contents[0].role, 'user');
+        return new Response('data: {"candidates":[{"content":{"parts":[{"text":"hidden","thought":true},{"text":"Hello"},{"text":" world"}]}}]}\n\n');
+      }
+      if (provider === 'anthropic') {
+        assert.equal(request.headers['x-api-key'], 'test-key');
+        assert.equal(body.system, 'Help me');
+        return new Response('data: {"type":"content_block_delta","delta":{"text":"Hello world"}}\n\n');
+      }
+      assert.equal(request.headers.Authorization, 'Bearer test-key');
+      assert.equal(body.messages[0].role, 'system');
+      return new Response('data: {"choices":[{"delta":{"content":"Hello world"}}]}\n\ndata: [DONE]\n\n');
+    };
+    vm.runInContext(fs.readFileSync(path.join(resourcesRoot, 'llm/llm-providers.js'), 'utf8'), ctx);
+    assert.equal(await ctx.sendToLlm({providerId:provider,model:'test',key:'test-key',system:'Help me',messages:[{role:'user',content:'Hi'}]}), 'Hello world');
+  }
+});
+
+test('assistant settings migrate precision and discard invalid conversation entries', async () => {
+  const ctx = loadLlmScript('llm-store.js', { jaaBrowser: { storage: { local: { get: async () => ({ jaaLLM: {
+    localDtype: 'q4f16',
+    localParameters: {
+      qwen: {contextWindow:8192,maxNewTokens:2048,doSample:true,temperature:0.4,unknown:'discard'},
+      broken: 'discard'
+    },
+    messages: [{ role: 'system', content: 'bad' }, { role: 'assistant', content: 'orphan' }, {role:'user',content:'Hi'}]
+  } }) } } } });
+  const settings = await ctx.getLlmSettings();
+  assert.equal(settings.localDtype, 'q4');
+  assert.deepEqual({...settings.localParameters.qwen}, {
+    contextWindow:8192,maxNewTokens:2048,temperature:0.4,doSample:true
+  });
+  assert.equal('broken' in settings.localParameters, false);
+  assert.equal(settings.messages.length, 1);
+  assert.equal(settings.messages[0].role, 'user');
+});
+
+test('assistant exposes persisted on-device parameter controls', () => {
+  const html = fs.readFileSync(path.join(resourcesRoot, 'options.html'), 'utf8');
+  const ui = fs.readFileSync(path.join(resourcesRoot, 'llm/llm-ui.js'), 'utf8');
+  for (const id of [
+    'llmContextWindow', 'llmMaxNewTokens', 'llmDoSample', 'llmTemperature',
+    'llmTopP', 'llmTopK', 'llmRepetitionPenalty', 'llmResetParameters'
+  ]) assert.match(html, new RegExp('id="' + id + '"'));
+  assert.match(ui, /parameters:\s*jaaLocalParameterSettings/);
+  assert.match(ui, /settings\.localParameters\[modelId\] = values/);
+});
+
+test('local model history omits an oversized old resume while preserving the latest turn', () => {
+  const ctx = loadLlmScript('llm-store.js');
+  const messages = [
+    {role:'user',content:'R'.repeat(12000)},
+    {role:'assistant',content:'Imported.'},
+    {role:'user',content:'Check this page'}
+  ];
+  assert.deepEqual(Array.from(ctx.jaaLlmLocalMessages(messages), message => ({...message})), [
+    {role:'user',content:'Check this page'}
+  ]);
+});
+
+test('page context selects the most recent web tab while the editor is active', async () => {
+  const ctx = loadLlmScript('llm-tools.js', { jaaBrowser: { tabs: {
+    query: async () => [
+      { id: 1, active: true, url: 'chrome-extension://test/options.html' },
+      { id: 2, url: 'https://example.com/old', lastAccessed: 10 },
+      { id: 3, url: 'https://example.com/job', lastAccessed: 20 }
+    ],
+    sendMessage: async (id, message) => {
+      assert.equal(id, 3);
+      if (message.type === 'JAA_AGENT_INSPECT_FORM') return {fields:[
+        {label:'First name',type:'text',current:'Alex',saved:'Alex'},
+        {label:'Phone',type:'tel',current:'',saved:'555-0100'}
+      ]};
+      return { title: 'Job', url: 'https://example.com/job', text: 'Engineer' };
+    }
+  } } });
+  const page = await ctx.jaaLlmPageContext();
+  assert.match(page, /Engineer/);
+  assert.match(page, /First name \(text\): filled: Alex/);
+  assert.match(page, /Phone \(tel\): empty; saved profile value available/);
+});
+
+test('removing a local model preserves unrelated cached models', async () => {
+  const removed = [];
+  const urls = [
+    'https://huggingface.co/onnx-community/model-a/resolve/main/config.json',
+    'https://huggingface.co/onnx-community/model-b/resolve/main/config.json',
+    'https://example.com/onnx-community/model-a/resolve/main/config.json'
+  ];
+  const ctx = loadLlmScript('llm-local.js', { URL, caches: {
+    keys: async () => ['transformers-cache'],
+    open: async () => ({ keys: async () => urls.map(url => ({url})), delete: async request => removed.push(request.url) })
+  } });
+  await ctx.removeLocalModelDownload('onnx-community/model-a');
+  assert.deepEqual(removed, [urls[0]]);
+});
+
+test('only enabled attachments run and extraction failures reach the UI', async () => {
+  const ctx = loadLlmScript('llm-tools.js');
+  const calls = [];
+  ctx.JAA_LLM_TOOLS = [
+    {id:'profile',label:'Profile',run:async()=>{calls.push('profile');return 'Known experience';}},
+    {id:'resume',label:'Resume',run:async()=>{calls.push('resume');throw new Error('Unreadable PDF');}}
+  ];
+  assert.match(await ctx.buildLlmContext({profile:true}), /Known experience/);
+  assert.deepEqual(calls, ['profile']);
+  await assert.rejects(ctx.buildLlmContext({resume:true}), /Resume: Unreadable PDF/);
+});
+
+test('worker cancellation terminates pending downloads and releases the worker', async () => {
+  let terminated = false;
+  const ctx = loadLlmScript('llm-local.js', {
+    window: {}, DOMException,
+    jaaBrowser: {runtime:{getURL: file => file}},
+    Worker: class { addEventListener() {} removeEventListener() {} postMessage() {} terminate() { terminated = true; } }
+  });
+  const controller = new AbortController();
+  const pending = ctx.sendToLocalLlm({model:'test',messages:[],signal:controller.signal});
+  controller.abort();
+  await assert.rejects(pending, {name:'AbortError'});
+  assert.equal(terminated, true);
+  assert.equal(ctx.jaaLocalWorker, null);
+});
+
+test('agent extracts and validates reviewable field and form actions', () => {
+  const ctx = loadLlmScript('llm-agent.js', { slugify: value => String(value).toLowerCase().replace(/\W+/g, '_') });
+  const parsed = ctx.jaaAgentExtractActions(
+    'I can do that. <applyonce_actions>[{"type":"set_field","field":"First Name","value":"Alex"},{"type":"fill_form"},{"type":"set_field","field":"password","value":"secret"}]</applyonce_actions>',
+    'Update my first name and fill the form'
+  );
+  assert.equal(parsed.text, 'I can do that.');
+  assert.deepEqual(Array.from(parsed.actions, action => ({...action})), [
+    {type:'set_field',field:'first_name',value:'Alex'}, {type:'fill_form'}
+  ]);
+  const fallback = ctx.jaaAgentExtractActions('Sure.', 'Set my preferred name to Sam.');
+  assert.deepEqual(Array.from(fallback.actions, action => ({...action})), [
+    {type:'set_field',field:'preferred_name',value:'Sam'}
+  ]);
+  const compound = ctx.jaaAgentExtractActions('Sure.', 'Set my preferred name to Sam and fill this form.');
+  assert.deepEqual(Array.from(compound.actions, action => ({...action})), [
+    {type:'set_field',field:'preferred_name',value:'Sam'}, {type:'fill_form'}
+  ]);
+  const append = ctx.jaaAgentExtractActions('Sure.', 'In address line 2, add Baner.');
+  assert.deepEqual(Array.from(append.actions, action => ({...action})), [
+    {type:'append_field',field:'address_line_2',value:'Baner'}
+  ]);
+});
+
+test('agent recognizes natural empty-field inspection requests', () => {
+  const ctx = loadLlmScript('llm-agent.js', { slugify: value => String(value).toLowerCase().replace(/\W+/g, '_') });
+  assert.equal(ctx.jaaAgentAsksForMissingPageFields('Which fields are not filled on this page?'), true);
+  assert.equal(ctx.jaaAgentAsksForMissingPageFields('Check the empty form inputs'), true);
+  assert.equal(ctx.jaaAgentAsksForMissingPageFields('Fill this form'), false);
+});
+
+test('agent copies explicit resume facts into scoped form actions without model inference', () => {
+  const ctx = loadLlmScript('llm-agent.js', { slugify: value => String(value).toLowerCase().replace(/\W+/g, '_').replace(/^_|_$/g, '') });
+  const resume = `Below is my resume, please update the missing fields.
+PROFILE SUMMARY
+Backend engineer.
+SKILLS
+Programming Languages: Java, Python
+WORK EXPERIENCE
+EXAMPLE CO | Engineer
+Pune, India | Mar 2025 – Present
+• Built reliable services.
+EDUCATION
+EXAMPLE UNIVERSITY | Bachelor of Engineering - Computer Science
+Pune, India | Aug 2018 - May 2022
+• CGPA : 9.17/10`;
+  const actions = ctx.jaaAgentExtractResumeActions(resume);
+  assert.ok(actions.some(action => action.field === 'work_experience_1_job_title' && action.value === 'Engineer'));
+  assert.ok(actions.some(action => action.field === 'work_experience_1_i_currently_work_here' && action.value === 'Yes'));
+  assert.ok(actions.some(action => action.field === 'education_1_field_of_study' && action.value === 'Computer Science'));
+  assert.equal(actions.at(-1).type, 'fill_form');
+});
+
+test('agent resolves append commands from the matching page field only', async () => {
+  const ctx = loadLlmScript('llm-agent.js', {
+    slugify: value => String(value).toLowerCase().replace(/\W+/g, '_').replace(/^_|_$/g, ''),
+    getState: async () => ({fields:{address_line_1:{value:'Balewadi'}}}),
+    jaaBrowser:{tabs:{sendMessage:async()=>({ok:true,title:'Application',url:'https://jobs.example/apply',fields:[
+      {label:'Address Line 1',key:'address_line_1',current:'Balewadi'},
+      {label:'Address Line 2',ref:'address_line_2',key:'',current:''}
+    ]})}}
+  });
+  const plan = await ctx.jaaAgentDescribeActions([{type:'append_field',field:'address_line_2',value:'Baner'}], 7);
+  assert.deepEqual(Array.from(plan.actions, action => ({...action})), [
+    {type:'set_field',field:'address_line_2',value:'Baner'}
+  ]);
+  assert.equal(plan.fields[0].from, '');
+  assert.equal(plan.fields[0].to, 'Baner');
+  assert.equal(plan.pageFields[0].label, 'Address Line 2');
+});
+
+test('agent profile updates preserve unrelated state and reject file replacement', async () => {
+  let state = {fields:{email:{value:'old@example.com',aliases:['Email'],type:'text'},resume:{value:'cv.pdf',type:'file'}},activityLog:[],applications:[{id:'a'}]};
+  const ctx = loadLlmScript('llm-agent.js', {
+    slugify: value => value, normalizeLabel: value => String(value).toLowerCase(), JAA_ACTIVITY_LOG_MAX:300,
+    getState: async () => structuredClone(state), setState: async value => { state = structuredClone(value); },
+    jaaBrowser:{tabs:{}}
+  });
+  await ctx.jaaAgentApplyActions({actions:[{type:'set_field',field:'email',value:'new@example.com'}]});
+  assert.equal(state.fields.email.value, 'new@example.com');
+  assert.equal(state.applications[0].id, 'a');
+  assert.equal(state.activityLog.at(-1).type, 'assistant-update');
+  await assert.rejects(ctx.jaaAgentApplyActions({actions:[{type:'set_field',field:'resume',value:'other.pdf'}]}), /file picker/);
+});
+
+test('agent refuses to fill a page that navigated after review', async () => {
+  const ctx = loadLlmScript('llm-agent.js', {
+    slugify:value=>value, normalizeLabel:value=>value, JAA_ACTIVITY_LOG_MAX:300,
+    jaaBrowser:{tabs:{get:async()=>({url:'https://changed.example/'}),sendMessage:async()=>{throw new Error('must not fill');}}}
+  });
+  await assert.rejects(ctx.jaaAgentApplyActions({
+    tabId: 3, form:{url:'https://original.example/'}, actions:[{type:'fill_form'}]
+  }), /changed after review/);
+});
+
+test('agent explains that an extension reload disconnects existing pages', async () => {
+  const ctx = loadLlmScript('llm-agent.js', {
+    slugify: value => String(value).toLowerCase().replace(/\W+/g, '_').replace(/^_|_$/g, ''),
+    getState: async () => ({ fields: {} }),
+    jaaBrowser: { tabs: { sendMessage: async () => { throw new Error('Could not establish connection. Receiving end does not exist.'); } } }
+  });
+  await assert.rejects(
+    ctx.jaaAgentDescribeActions([{ type: 'fill_form' }], 7),
+    /Reload the selected webpage once/
+  );
+});
+
+test('approved field changes update profile and the matching open page', async () => {
+  let state = {fields:{},activityLog:[]};
+  const sent = [];
+  const ctx = loadLlmScript('llm-agent.js', {
+    slugify:value=>value, normalizeLabel:value=>value, JAA_ACTIVITY_LOG_MAX:300,
+    getState:async()=>structuredClone(state), setState:async value=>{state=structuredClone(value);},
+    jaaBrowser:{tabs:{
+      get:async()=>({url:'https://jobs.example/apply'}),
+      sendMessage:async(id,message)=>{sent.push(message);return {ok:true,updatedCount:1};}
+    }}
+  });
+  const result = await ctx.jaaAgentApplyActions({
+    tabId:7, form:{url:'https://jobs.example/apply'},
+    actions:[{type:'set_field',field:'address_line_2',value:'Baner'}],
+    pageFields:[{field:'address_line_2',label:'Address Line 2',value:'Baner'}]
+  });
+  assert.equal(state.fields.address_line_2.value, 'Baner');
+  assert.equal(sent[0].type, 'JAA_AGENT_SET_FIELDS');
+  assert.equal(result.pageUpdate.updatedCount, 1);
+});
+
+test('content script exposes inspect and fill messages without a submit capability', () => {
+  const source = fs.readFileSync(path.join(resourcesRoot, 'content.js'), 'utf8');
+  assert.match(source, /JAA_AGENT_INSPECT_FORM/);
+  assert.match(source, /JAA_AGENT_FILL_FORM/);
+  assert.match(source, /JAA_AGENT_SET_FIELDS/);
+  assert.match(source, /getAgentFieldRef/);
+  assert.doesNotMatch(source, /JAA_AGENT_SUBMIT/);
 });

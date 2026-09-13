@@ -15,3 +15,7 @@ node_modules/
 
 # Private local profiles and resumes
 LocalData/
+
+# Opt-in Transformers.js runtime (npm run vendor:llm)
+ApplyOnce Extension/Resources/vendor/
+dist/chromium/vendor/
