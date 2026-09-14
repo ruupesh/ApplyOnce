@@ -689,6 +689,10 @@ textarea.valueInput {
   font-weight: 400;
 }
 
+.llmLimitControl { display: flex; gap: 6px; min-width: 0; }
+.llmLimitControl input { flex: 1; width: auto; }
+.llmLimitControl button { flex: none; }
+
 .llmParameterGrid small {
   color: #6b7280;
   font-size: 11px;
@@ -704,6 +708,9 @@ textarea.valueInput {
   font-size: 12px;
   color: #374151;
 }
+
+.llmSamplingToggle[hidden] { display: none; }
+.llmSamplingToggle.isDisabled { opacity: 0.5; }
 
 .llmParameterFooter {
   display: flex;
@@ -871,6 +878,18 @@ textarea.valueInput {
 .llmText blockquote { margin: 6px 0; padding-left: 10px; border-left: 3px solid #9ca3af; color: #4b5563; }
 .llmText a { color: #2563eb; }
 
+.llmReasoning {
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 12px;
+}
+
+.llmReasoning[hidden] { display: none; }
+.llmReasoning summary { cursor: pointer; padding: 7px 10px; font-weight: 600; }
+.llmReasoningText { padding: 0 10px 9px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow-y: auto; }
+
 .llmMsg.user .llmText {
   white-space: pre-wrap;
   background: #eef2ff;
@@ -917,6 +936,20 @@ textarea.valueInput {
   width: 0;
   background: #2563eb;
   transition: width 0.2s ease;
+}
+
+.llmProgress.loading .llmProgressBar {
+  background: #bfdbfe;
+  animation: llmLoadingPulse 1.2s ease-in-out infinite alternate;
+}
+
+@keyframes llmLoadingPulse {
+  from { opacity: 0.35; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .llmProgress.loading .llmProgressBar { animation: none; }
 }
 
 .llmProgressText {

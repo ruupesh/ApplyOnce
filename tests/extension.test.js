@@ -626,7 +626,9 @@ function loadLlmScript(name, extra = {}) {
 
 test('local model replacement releases the previous pipeline', async () => {
   const calls = [];
-  const ctx = loadLlmScript('llm-local.js');
+  const ctx = loadLlmScript('llm-local.js', { navigator: { storage: {
+    persist: async () => { calls.push('persist'); return true; }
+  } } });
   ctx.jaaLocalDevice = async () => 'wasm';
   ctx.jaaLoadLocalModule = async () => ({ pipeline: async (task, model, options) => {
     calls.push([model, options.dtype]);
@@ -635,7 +637,7 @@ test('local model replacement releases the previous pipeline', async () => {
   await ctx.jaaGetLocalPipeline('first', 'q4f16');
   await ctx.jaaGetLocalPipeline('first', 'q4f16');
   await ctx.jaaGetLocalPipeline('second', 'q4f16');
-  assert.deepEqual(calls, [['first', 'q4'], 'disposed', ['second', 'q4']]);
+  assert.deepEqual(calls, ['persist', ['first', 'q4'], 'disposed', 'persist', ['second', 'q4']]);
 });
 
 test('Qwen3 and DeepSeek R1 Qwen use their supported q4f16 graphs on WebGPU', async () => {
@@ -654,6 +656,50 @@ test('Qwen3 and DeepSeek R1 Qwen use their supported q4f16 graphs on WebGPU', as
   ]);
 });
 
+test('Llama 3.2 3B uses WebGPU q4f16 and fails before loading on WASM', async () => {
+  const model = 'onnx-community/Llama-3.2-3B-Instruct-ONNX';
+  const calls = [];
+  const ctx = loadLlmScript('llm-local.js');
+  ctx.jaaLocalDevice = async () => 'webgpu';
+  ctx.jaaLoadLocalModule = async () => ({ pipeline: async (task, id, options) => {
+    calls.push([id, options.dtype, options.device]);
+    return { dispose: async () => {} };
+  } });
+  await ctx.jaaGetLocalPipeline(model, 'q4');
+  assert.deepEqual(calls, [[model, 'q4f16', 'webgpu']]);
+  ctx.jaaLocalDevice = async () => 'wasm';
+  await assert.rejects(ctx.jaaGetLocalPipeline(model, 'q4'), /requires WebGPU/);
+  assert.equal(calls.length, 1);
+  assert.match(ctx.jaaLocalFriendlyError('RuntimeError: memory access out of bounds', model), /out-of-bounds memory access/);
+});
+
+test('Qwen3 4B uses its q4f16 WebGPU export', async () => {
+  const ctx = loadLlmScript('llm-local.js');
+  const qwen = 'onnx-community/Qwen3-4B-ONNX';
+  const calls = [];
+  ctx.jaaLocalDevice = async () => 'webgpu';
+  ctx.jaaLoadLocalModule = async () => ({ pipeline: async (task, id, options) => {
+    calls.push([id, options.dtype, options.device]);
+    return { dispose: async () => {} };
+  } });
+  await ctx.jaaGetLocalPipeline(qwen, 'q4');
+  assert.deepEqual(calls, [[qwen, 'q4f16', 'webgpu']]);
+  ctx.jaaLocalDevice = async () => 'wasm';
+  await assert.rejects(ctx.jaaGetLocalPipeline(qwen, 'q4'), /requires WebGPU/);
+  assert.equal(calls.length, 1);
+});
+
+test('ORT GenAI Phi-4 repository fails clearly before attempting a Transformers.js download', async () => {
+  const model = 'microsoft/Phi-4-reasoning-onnx';
+  const ctx = loadLlmScript('llm-local.js');
+  ctx.jaaLocalDevice = () => { throw new Error('must not probe runtime'); };
+  await assert.rejects(ctx.jaaGetLocalPipeline(model, 'q4'), /ONNX Runtime GenAI/);
+  assert.match(ctx.jaaLocalFriendlyError(
+    'Could not locate file: "https://huggingface.co/example/model/resolve/main/onnx/model_q4.onnx"',
+    'example/model'
+  ), /Transformers\.js ONNX export/);
+});
+
 test('Qwen3 uses thinking-mode sampling with a browser-safe output budget', () => {
   const ctx = loadLlmScript('llm-local.js');
   const qwen3 = ctx.jaaLocalGenerationOptions('onnx-community/Qwen3-0.6B-ONNX');
@@ -667,14 +713,56 @@ test('Qwen3 uses thinking-mode sampling with a browser-safe output budget', () =
   });
 });
 
-test('local model parameters allow 64K context and 16K output', () => {
+test('Gemma 4 uses q4f16 on WebGPU and makes thinking optional', async () => {
+  const model = 'onnx-community/gemma-4-E4B-it-ONNX';
+  const ctx = loadLlmScript('llm-local.js');
+  const loaded = [];
+  ctx.jaaLocalDevice = async () => 'webgpu';
+  ctx.jaaLoadLocalModule = async () => ({ pipeline: async (task, id, options) => {
+    loaded.push([id, options.dtype, options.device]);
+    return { dispose: async () => {} };
+  } });
+  await ctx.jaaGetLocalPipeline(model, 'q4');
+  assert.deepEqual(loaded, [[model, 'q4f16', 'webgpu']]);
+  assert.match(ctx.jaaLocalFriendlyError(
+    "Failed to execute 'mapAsync' on 'GPUBuffer': [Invalid Buffer] is invalid due to a previous error.", model
+  ), /WebGPU is already enabled/);
+  const defaults = ctx.jaaLocalParameterDefaults(model);
+  assert.equal(defaults.maxNewTokens, 1024);
+  assert.equal(defaults.doSample, true);
+  assert.equal(defaults.temperature, 1);
+  assert.equal(ctx.jaaLocalParameterSettings(model).enableThinking, false);
+  let streamerOptions;
+  let generationOptions;
+  let templateOptions;
+  const generator = async (messages, options) => {
+    generationOptions = options;
+    options.streamer.callback_function('<|channel>thought\nA step.<channel|>Answer<turn|>');
+  };
+  generator.tokenizer = {apply_chat_template: (messages, options) => { templateOptions = options; return [1, 2, 3]; }};
+  ctx.jaaGetLocalPipeline = async () => generator;
+  ctx.jaaLoadLocalModule = async () => ({
+    TextStreamer: class { constructor(tokenizer, options) { streamerOptions = options; this.callback_function = options.callback_function; } },
+    InterruptableStoppingCriteria: class {}
+  });
+  const reply = await ctx.jaaGenerateLocalLlm({model, system: 'Help', messages: [{role:'user',content:'Hi'}]});
+  assert.equal(streamerOptions.skip_special_tokens, false);
+  assert.equal(generationOptions.tokenizer_encode_kwargs.enable_thinking, false);
+  assert.equal(templateOptions.enable_thinking, false);
+  await ctx.jaaGenerateLocalLlm({model, parameters: {enableThinking: true}, system: 'Help', messages: [{role:'user',content:'Think'}]});
+  assert.equal(generationOptions.tokenizer_encode_kwargs.enable_thinking, true);
+  assert.equal(templateOptions.enable_thinking, true);
+  assert.match(reply, /<\|channel>thought/);
+});
+
+test('local model parameters preserve any positive context window without an artificial cap', () => {
   const ctx = loadLlmScript('llm-local.js');
   const model = 'onnx-community/Qwen3-0.6B-ONNX';
   assert.deepEqual({...ctx.jaaLocalParameterBounds(model)}, {
-    contextMin: 512, contextMax: 65536, outputMin: 16, outputMax: 16384
+    contextMax: null, outputMin: 16, outputMax: 16384
   });
   assert.deepEqual({...ctx.jaaLocalParameterSettings(model, {
-    contextWindow: 70000,
+    contextWindow: 200000,
     maxNewTokens: 20000,
     doSample: false,
     temperature: 9,
@@ -682,22 +770,79 @@ test('local model parameters allow 64K context and 16K output', () => {
     topK: 900,
     repetitionPenalty: 0
   })}, {
-    contextWindow: 65536,
+    contextWindow: 200000,
     maxNewTokens: 16384,
     doSample: false,
     temperature: 2,
     topP: 0.01,
     topK: 100,
-    repetitionPenalty: 0.5
+    repetitionPenalty: 0.5,
+    enableThinking: true
   });
   assert.deepEqual({...ctx.jaaLocalGenerationOptions(model, {doSample:false,maxNewTokens:512})}, {
     max_new_tokens: 512, do_sample: false, repetition_penalty: 1.1
   });
+  assert.equal(ctx.jaaLocalParameterSettings(model, {contextWindow: 1}).contextWindow, 1);
   const deepSeek = 'onnx-community/DeepSeek-R1-Distill-Qwen-1.5B-ONNX';
   assert.equal(ctx.jaaLocalParameterDefaults(deepSeek).maxNewTokens, 512);
   assert.equal(ctx.jaaLocalParameterDefaults(deepSeek).doSample, false);
   assert.match(ctx.jaaLocalFriendlyError("Can't create a session. ERROR_MESSAGE: std::bad_alloc", deepSeek), /browser\/export allocation limit/i);
   assert.equal(ctx.jaaLocalRevision(deepSeek), '61425627ba20650f3540d034589d35f00514ba7c');
+});
+
+test('listed models expose their published context length and reasoning capability', () => {
+  const ctx = loadLlmScript('llm-local.js');
+  const cases = [
+    ['onnx-community/Llama-3.2-3B-Instruct-ONNX', 131072, false],
+    ['onnx-community/Qwen3-4B-ONNX', 40960, true],
+    ['onnx-community/gemma-4-E4B-it-ONNX', 131072, true],
+    ['onnx-community/gemma-4-E2B-it-ONNX', 131072, true]
+  ];
+  for (const [model, contextMax, reasoning] of cases) {
+    assert.deepEqual({...ctx.jaaLocalParameterBounds(model)}, {
+      contextMax, outputMin: 16, outputMax: contextMax - 1
+    });
+    assert.equal(ctx.jaaLocalSupportsReasoning(model), reasoning);
+    assert.equal(ctx.jaaLocalParameterSettings(model, {contextWindow: contextMax + 1}).contextWindow, contextMax + 1);
+    assert.equal(ctx.jaaLocalParameterSettings(model, {maxNewTokens: contextMax}).maxNewTokens, contextMax - 1);
+  }
+});
+
+test('max output budget leaves room for the actual prompt', async () => {
+  const ctx = loadLlmScript('llm-local.js');
+  const model = 'onnx-community/Qwen3-4B-ONNX';
+  let used;
+  const generator = async (messages, options) => { used = options; };
+  generator.tokenizer = { apply_chat_template: () => Array(100).fill(1) };
+  ctx.jaaGetLocalPipeline = async () => generator;
+  ctx.jaaLoadLocalModule = async () => ({
+    TextStreamer: class { constructor() {} },
+    InterruptableStoppingCriteria: class {}
+  });
+  await ctx.jaaGenerateLocalLlm({
+    model, system: 'Help', messages: [{role:'user',content:'Hi'}],
+    parameters: {contextWindow: 40960, maxNewTokens: 40959, enableThinking: false}
+  });
+  assert.equal(used.max_new_tokens, 40860);
+  assert.equal(used.tokenizer_encode_kwargs.enable_thinking, false);
+});
+
+test('local download forwards aggregate bytes instead of restarting progress for each file', async () => {
+  const ctx = loadLlmScript('llm-local.js');
+  const reports = [];
+  ctx.jaaLocalDevice = async () => 'wasm';
+  ctx.jaaLoadLocalModule = async () => ({ pipeline: async (task, model, options) => {
+    options.progress_callback({status: 'progress', file: 'first', loaded: 50, total: 100});
+    options.progress_callback({status: 'progress_total', loaded: 50, total: 300});
+    options.progress_callback({status: 'progress', file: 'second', loaded: 5, total: 200});
+    options.progress_callback({status: 'progress_total', loaded: 105, total: 300});
+    return {dispose: async () => {}};
+  } });
+  await ctx.jaaGetLocalPipeline('test', 'q4', report => reports.push(report));
+  assert.deepEqual(reports.map(report => report.status), ['loading', 'progress', 'progress']);
+  assert.deepEqual(reports.slice(1).map(report => [report.loaded, report.total, report.percent]), [
+    [50, 300, 17], [105, 300, 35]
+  ]);
 });
 
 test('reasoning is separated from the final answer and unfinished thinking is detected', () => {
@@ -710,6 +855,12 @@ test('reasoning is separated from the final answer and unfinished thinking is de
   assert.equal(unfinished.answer, '');
   assert.equal(unfinished.thinking, true);
   assert.equal(unfinished.incomplete, true);
+  const gemma = ctx.jaaLlmSplitReasoning('<|channel>thought\nCheck the facts.\n<channel|>## Answer\nDone.<turn|>');
+  assert.equal(gemma.reasoning, 'Check the facts.');
+  assert.equal(gemma.answer, '## Answer\nDone.');
+  assert.equal(gemma.incomplete, false);
+  assert.equal(ctx.jaaLlmSplitReasoning('<|channel>thought\nWorking').thinking, true);
+  assert.equal(ctx.jaaLlmSplitReasoning('<|channel>').answer, '');
 });
 
 test('assistant Markdown creates safe formatting nodes without executable HTML', () => {
@@ -775,6 +926,14 @@ test('provider errors inside a successful HTTP stream remain visible', async () 
   await assert.rejects(ctx.jaaLlmReadSSE(new Response('data: {"error":{"message":"Quota exceeded"}}\n\n'), () => {}), /Quota exceeded/);
 });
 
+test('saved reasoning stays visible in history but is omitted from hosted model requests', () => {
+  const ctx = loadLlmScript('llm-providers.js');
+  const history = [{role:'assistant', content:'Final answer', reasoning:'Private model reasoning'}];
+  const wire = ctx.jaaLlmWireMessages(history);
+  assert.deepEqual({...wire[0]}, {role:'assistant', content:'Final answer'});
+  assert.equal(history[0].reasoning, 'Private model reasoning');
+});
+
 test('all five provider adapters build requests and extract streamed responses', async () => {
   for (const provider of ['openai', 'groq', 'deepseek', 'anthropic', 'gemini']) {
     const ctx = loadLlmScript('llm-store.js');
@@ -804,7 +963,7 @@ test('assistant settings migrate precision and discard invalid conversation entr
   const ctx = loadLlmScript('llm-store.js', { jaaBrowser: { storage: { local: { get: async () => ({ jaaLLM: {
     localDtype: 'q4f16',
     localParameters: {
-      qwen: {contextWindow:8192,maxNewTokens:2048,doSample:true,temperature:0.4,unknown:'discard'},
+      qwen: {contextWindow:8192,maxNewTokens:2048,doSample:true,enableThinking:true,temperature:0.4,unknown:'discard'},
       broken: 'discard'
     },
     messages: [{ role: 'system', content: 'bad' }, { role: 'assistant', content: 'orphan' }, {role:'user',content:'Hi'}]
@@ -812,11 +971,40 @@ test('assistant settings migrate precision and discard invalid conversation entr
   const settings = await ctx.getLlmSettings();
   assert.equal(settings.localDtype, 'q4');
   assert.deepEqual({...settings.localParameters.qwen}, {
-    contextWindow:8192,maxNewTokens:2048,temperature:0.4,doSample:true
+    contextWindow:8192,maxNewTokens:2048,temperature:0.4,doSample:true,enableThinking:true
   });
   assert.equal('broken' in settings.localParameters, false);
   assert.equal(settings.messages.length, 1);
   assert.equal(settings.messages[0].role, 'user');
+});
+
+test('local model picker contains only the four requested models', async () => {
+  const ctx = loadLlmScript('llm-store.js');
+  assert.deepEqual(Array.from(ctx.JAA_LLM_LOCAL_MODELS, model => model.id), [
+    'onnx-community/Llama-3.2-3B-Instruct-ONNX',
+    'onnx-community/Qwen3-4B-ONNX',
+    'onnx-community/gemma-4-E4B-it-ONNX',
+    'onnx-community/gemma-4-E2B-it-ONNX'
+  ]);
+  const ui = fs.readFileSync(path.join(resourcesRoot, 'llm/llm-ui.js'), 'utf8');
+  assert.doesNotMatch(ui, /Other Hugging Face model|cachedModels|localModelHistory\s*\|\|/);
+});
+
+test('old and unsupported local models do not return from saved settings', async () => {
+  let stored;
+  const ctx = loadLlmScript('llm-store.js', { jaaBrowser: { storage: { local: {
+    get: async () => ({ jaaLLM: stored }),
+    set: async value => { stored = value.jaaLLM; }
+  } } } });
+  const settings = ctx.jaaLlmDefaults();
+  settings.localModel = 'example/old-onnx';
+  settings.localModelHistory = ['onnx-community/gemma-4-E4B-it-ONNX', 'example/old-onnx', 'microsoft/Phi-4-reasoning-onnx'];
+  await ctx.setLlmSettings(settings);
+  const restored = await ctx.getLlmSettings();
+  assert.equal(restored.localModel, ctx.JAA_LLM_LOCAL_MODELS[0].id);
+  assert.deepEqual([...restored.localModelHistory], ['onnx-community/gemma-4-E4B-it-ONNX']);
+  ctx.jaaLlmRememberLocalModel(restored, 'example/old-onnx');
+  assert.deepEqual([...restored.localModelHistory], ['onnx-community/gemma-4-E4B-it-ONNX']);
 });
 
 test('assistant exposes persisted on-device parameter controls', () => {
@@ -824,7 +1012,8 @@ test('assistant exposes persisted on-device parameter controls', () => {
   const ui = fs.readFileSync(path.join(resourcesRoot, 'llm/llm-ui.js'), 'utf8');
   for (const id of [
     'llmContextWindow', 'llmMaxNewTokens', 'llmDoSample', 'llmTemperature',
-    'llmTopP', 'llmTopK', 'llmRepetitionPenalty', 'llmResetParameters'
+    'llmTopP', 'llmTopK', 'llmRepetitionPenalty', 'llmResetParameters', 'llmEnableThinking',
+    'llmMaxContext', 'llmMaxOutput'
   ]) assert.match(html, new RegExp('id="' + id + '"'));
   assert.match(ui, /parameters:\s*jaaLocalParameterSettings/);
   assert.match(ui, /settings\.localParameters\[modelId\] = values/);
@@ -877,6 +1066,23 @@ test('removing a local model preserves unrelated cached models', async () => {
   } });
   await ctx.removeLocalModelDownload('onnx-community/model-a');
   assert.deepEqual(removed, [urls[0]]);
+});
+
+test('cached ONNX models can still be inspected independently of the picker', async () => {
+  const urls = [
+    'https://huggingface.co/onnx-community/model-a/resolve/main/onnx/model_q4.onnx',
+    'https://huggingface.co/onnx-community/model-a/resolve/main/onnx/model_q4.onnx_data',
+    'https://huggingface.co/onnx-community/model-b/resolve/main/onnx/model_q4f16.onnx',
+    'https://huggingface.co/microsoft/Phi-4-reasoning-onnx/resolve/main/config.json',
+    'https://example.com/onnx-community/model-c/resolve/main/onnx/model_q4.onnx'
+  ];
+  const ctx = loadLlmScript('llm-local.js', { URL, caches: {
+    keys: async () => ['transformers-cache'],
+    open: async () => ({ keys: async () => urls.map(url => ({url})) })
+  } });
+  assert.deepEqual([...(await ctx.listCachedLocalModels())], [
+    'onnx-community/model-a', 'onnx-community/model-b'
+  ]);
 });
 
 test('only enabled attachments run and extraction failures reach the UI', async () => {

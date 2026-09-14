@@ -24,12 +24,38 @@ function jaaLocalIsQwen3(modelId) {
   return /(?:^|[\/_-])qwen3(?:[\/_-]|$)/i.test(String(modelId || ""));
 }
 
+function jaaLocalIsQwen34B(modelId) {
+  return String(modelId || "").toLowerCase() === "onnx-community/qwen3-4b-onnx";
+}
+
 function jaaLocalIsDeepSeekR1Qwen(modelId) {
   return /deepseek[\/_-]r1[\/_-]distill[\/_-]qwen/i.test(String(modelId || ""));
 }
 
+function jaaLocalIsLlama32ThreeB(modelId) {
+  return String(modelId || "").toLowerCase() === "onnx-community/llama-3.2-3b-instruct-onnx";
+}
+
+function jaaLocalIsPhi4ReasoningGenAI(modelId) {
+  return String(modelId || "").toLowerCase() === "microsoft/phi-4-reasoning-onnx";
+}
+
+function jaaLocalIsGemma4(modelId) {
+  return /(?:^|\/)gemma-4-/i.test(String(modelId || ""));
+}
+
+function jaaLocalSupportsReasoning(modelId) {
+  return jaaLocalIsQwen3(modelId) || jaaLocalIsGemma4(modelId);
+}
+
+function jaaLocalModelMaxContext(modelId) {
+  if (jaaLocalIsQwen34B(modelId)) return 40960;
+  if (jaaLocalIsLlama32ThreeB(modelId) || jaaLocalIsGemma4(modelId)) return 131072;
+  return null;
+}
+
 function jaaLocalPrefersQ4f16(modelId) {
-  return jaaLocalIsQwen3(modelId) || jaaLocalIsDeepSeekR1Qwen(modelId);
+  return jaaLocalIsQwen3(modelId) || jaaLocalIsDeepSeekR1Qwen(modelId) || jaaLocalIsLlama32ThreeB(modelId) || jaaLocalIsGemma4(modelId);
 }
 
 function jaaLocalRevision(modelId) {
@@ -43,26 +69,29 @@ function jaaLocalRevision(modelId) {
 }
 
 function jaaLocalParameterBounds(modelId) {
+  var contextMax = jaaLocalModelMaxContext(modelId);
   return {
-    contextMin: 512,
-    contextMax: 65536,
+    contextMax: contextMax,
     outputMin: 16,
-    outputMax: 16384
+    outputMax: contextMax ? contextMax - 1 : 16384
   };
 }
 
 function jaaLocalParameterDefaults(modelId) {
   var qwen3 = jaaLocalIsQwen3(modelId);
   var deepSeek = jaaLocalIsDeepSeekR1Qwen(modelId);
-  return {
+  var gemma4 = jaaLocalIsGemma4(modelId);
+  var defaults = {
     contextWindow: qwen3 ? 8192 : 4096,
-    maxNewTokens: qwen3 ? 4096 : (deepSeek ? 512 : 256),
-    doSample: qwen3,
-    temperature: qwen3 || deepSeek ? 0.6 : 0.7,
-    topP: qwen3 || deepSeek ? 0.95 : 0.9,
-    topK: qwen3 || deepSeek ? 20 : 50,
+    maxNewTokens: qwen3 ? 4096 : (gemma4 ? 1024 : (deepSeek ? 512 : 256)),
+    doSample: qwen3 || gemma4,
+    temperature: gemma4 ? 1 : (qwen3 || deepSeek ? 0.6 : 0.7),
+    topP: qwen3 || deepSeek || gemma4 ? 0.95 : 0.9,
+    topK: gemma4 ? 64 : (qwen3 || deepSeek ? 20 : 50),
     repetitionPenalty: 1.1
   };
+  if (jaaLocalSupportsReasoning(modelId)) defaults.enableThinking = qwen3;
+  return defaults;
 }
 
 function jaaLocalParameterSettings(modelId, overrides) {
@@ -74,17 +103,21 @@ function jaaLocalParameterSettings(modelId, overrides) {
     value = Math.max(min, Math.min(max, value));
     return integer ? Math.round(value) : Math.round(value * 100) / 100;
   }
-  var contextWindow = number("contextWindow", bounds.contextMin, bounds.contextMax, true);
-  var outputMax = Math.max(bounds.outputMin, Math.min(bounds.outputMax, contextWindow - 128));
-  return {
+  var contextWindow = typeof source.contextWindow === "number" && Number.isSafeInteger(source.contextWindow) && source.contextWindow > 0
+    ? source.contextWindow : defaults.contextWindow;
+  var settings = {
     contextWindow: contextWindow,
-    maxNewTokens: number("maxNewTokens", bounds.outputMin, outputMax, true),
+    maxNewTokens: number("maxNewTokens", bounds.outputMin, bounds.outputMax, true),
     doSample: typeof source.doSample === "boolean" ? source.doSample : defaults.doSample,
     temperature: number("temperature", 0.01, 2, false),
     topP: number("topP", 0.01, 1, false),
     topK: number("topK", 0, 100, true),
     repetitionPenalty: number("repetitionPenalty", 0.5, 2, false)
   };
+  if (jaaLocalSupportsReasoning(modelId)) {
+    settings.enableThinking = typeof source.enableThinking === "boolean" ? source.enableThinking : defaults.enableThinking;
+  }
+  return settings;
 }
 
 function jaaLocalGenerationOptions(modelId, overrides) {
@@ -104,12 +137,30 @@ function jaaLocalGenerationOptions(modelId, overrides) {
 
 function jaaLocalFriendlyError(value, modelId) {
   var detail = String(value || "The on-device model could not generate a reply.");
+  if (/could not locate file:.*\/onnx\/model_(?:q4|q4f16)\.onnx/i.test(detail)) {
+    return "This repository does not provide the Transformers.js ONNX export this extension needs (onnx/model_q4.onnx or model_q4f16.onnx). Choose a Transformers.js-compatible text-generation model; ONNX Runtime GenAI exports cannot be loaded by this provider.";
+  }
+  if (/memory access out of bounds/i.test(detail)) {
+    var advice = jaaLocalIsLlama32ThreeB(modelId)
+      ? "Use a WebGPU-capable browser with the full on-device runtime, or choose a smaller model."
+      : "Try a smaller model if the error persists.";
+    return "The ONNX runtime hit an out-of-bounds memory access. A large model can exceed browser limits. Reload ApplyOnce and retry with a shorter context and output limit. " + advice;
+  }
   if (/std::bad_alloc|out of memory|failed to allocate|allocation failed/i.test(detail)) {
     var name = jaaLocalIsDeepSeekR1Qwen(modelId) ? "DeepSeek R1 Qwen 1.5B" : "This model";
     return name + " could not create an ONNX session in this browser. This can be a browser/export allocation limit even when the Mac has enough physical memory. Reload ApplyOnce and retry with WebGPU, or reduce the context window and output limit.";
   }
+  if (/table index is out of bounds/i.test(detail)) {
+    var wasm = jaaLocalIsDeepSeekR1Qwen(modelId)
+      ? "DeepSeek R1 Qwen 1.5B requires the WebGPU runtime. Its q4 WASM graph exceeds the browser's WebAssembly function-table limit."
+      : "This model's WASM graph exceeds the browser's WebAssembly function-table limit.";
+    return wasm + " Rebuild with the full runtime (npm run vendor:llm) so WebGPU is available, or choose a smaller model like Qwen3 0.6B or SmolLM2 360M.";
+  }
   if (/unaligned accesses/i.test(detail)) {
     return "The browser ONNX backend could not execute this prompt. The model was unloaded safely; retry after reloading ApplyOnce or use a shorter prompt.";
+  }
+  if (/failed to download data from buffer|mapasync.*gpu(buffer)?|invalid buffer.*previous error/i.test(detail)) {
+    return "WebGPU is already enabled, but ONNX Runtime could not read a GPU buffer after an earlier GPU error. Reload ApplyOnce and retry with a shorter context or output limit. If it persists, check the browser console for the first WebGPU validation or out-of-memory error; this final buffer message does not identify the original failure.";
   }
   return detail;
 }
@@ -158,11 +209,20 @@ async function jaaLoadLocalModule() {
 
 // Keeps one generator warm; switching model or precision rebuilds it.
 async function jaaGetLocalPipeline(modelId, dtype, onProgress) {
+  if (jaaLocalIsPhi4ReasoningGenAI(modelId)) {
+    throw new Error("microsoft/Phi-4-reasoning-onnx is packaged for ONNX Runtime GenAI, not this extension's Transformers.js provider. It has no onnx/model_q4.onnx export. Choose a Transformers.js-compatible text-generation model.");
+  }
   var device = await jaaLocalDevice();
+  if (jaaLocalIsLlama32ThreeB(modelId) && device !== "webgpu") {
+    throw new Error("Llama 3.2 3B requires WebGPU in this extension. Enable WebGPU and install a build with the full on-device runtime, or choose a smaller model.");
+  }
+  if (jaaLocalIsQwen34B(modelId) && device !== "webgpu") {
+    throw new Error("Qwen3 4B provides only a q4f16 ONNX export and requires WebGPU in this extension.");
+  }
   if (device === "wasm" && dtype === "q4f16") dtype = "q4";
-  // The official Qwen3 and DeepSeek-R1-Distill-Qwen browser examples use
-  // q4f16. For DeepSeek 1.5B it is also about 600 MB smaller than q4; Qwen3's
-  // integer-only q4 graph can hit Dawn's unaligned-access shader validation.
+  // The official browser examples for Qwen3, DeepSeek-R1-Distill-Qwen, and
+  // Gemma 4 use q4f16. Qwen3's integer-only q4 graph can also hit Dawn's
+  // unaligned-access shader validation.
   if (device === "webgpu" && jaaLocalPrefersQ4f16(modelId)) dtype = "q4f16";
   var revision = jaaLocalRevision(modelId);
   var key = modelId + "|" + revision + "|" + dtype + "|" + device;
@@ -170,17 +230,25 @@ async function jaaGetLocalPipeline(modelId, dtype, onProgress) {
 
   var module = await jaaLoadLocalModule();
   await unloadLocalLlm();
+  // Cache Storage can otherwise be evicted under storage pressure in browsers
+  // that do not grant extension origins persistent storage by default.
+  try {
+    if (typeof navigator !== "undefined" && navigator.storage && navigator.storage.persist) {
+      await navigator.storage.persist();
+    }
+  } catch (error) { /* Continue if the browser cannot grant persistence. */ }
+  if (onProgress) onProgress({ status: "loading" });
   var generator = await module.pipeline("text-generation", modelId, {
     dtype: dtype,
     device: device,
     revision: revision,
     progress_callback: function (report) {
-      if (!onProgress || report.status !== "progress" || !report.total) return;
+      if (!onProgress || report.status !== "progress_total" || !report.total) return;
       onProgress({
-        file: report.file,
+        status: "progress",
         loaded: report.loaded,
         total: report.total,
-        percent: Math.round((report.loaded / report.total) * 100)
+        percent: Math.min(100, Math.round((report.loaded / report.total) * 100))
       });
     }
   });
@@ -211,6 +279,21 @@ async function removeLocalModelDownload(modelId) {
   }).map(function (request) { return cache.delete(request); }));
 }
 
+async function listCachedLocalModels() {
+  if (typeof caches === "undefined" || !(await caches.keys()).includes("transformers-cache")) return [];
+  var cache = await caches.open("transformers-cache");
+  var requests = await cache.keys();
+  var models = [];
+  requests.forEach(function (request) {
+    var url = new URL(request.url);
+    var path = url.pathname.split("/").filter(Boolean);
+    if (url.hostname !== "huggingface.co" || path.length < 6 || path[2] !== "resolve" || path[4] !== "onnx" || !/\.onnx$/.test(path[5])) return;
+    var modelId = decodeURIComponent(path[0]) + "/" + decodeURIComponent(path[1]);
+    if (models.indexOf(modelId) === -1) models.push(modelId);
+  });
+  return models;
+}
+
 async function jaaGenerateLocalLlm(options) {
   if (options.signal) options.signal.throwIfAborted();
   var parameterSettings = jaaLocalParameterSettings(options.model, options.parameters);
@@ -225,7 +308,7 @@ async function jaaGenerateLocalLlm(options) {
   var text = "";
   var streamer = new module.TextStreamer(generator.tokenizer, {
     skip_prompt: true,
-    skip_special_tokens: true,
+    skip_special_tokens: !jaaLocalIsGemma4(options.model),
     callback_function: function (delta) {
       text += delta;
       if (options.onDelta) options.onDelta(delta);
@@ -236,22 +319,23 @@ async function jaaGenerateLocalLlm(options) {
   var recentMessages = typeof jaaLlmLocalMessages === "function" ? jaaLlmLocalMessages(options.messages) : options.messages;
   var conversation = [{ role: "system", content: options.system }].concat(recentMessages);
   try {
-    // Respect both the user's selected limit and the model architecture.
+    // Use the user's selected context budget; the model runtime reports unsupported sizes.
     var generationOptions = jaaLocalGenerationOptions(options.model, parameterSettings);
-    var isQwen3 = jaaLocalIsQwen3(options.model);
-    var isDeepSeek = jaaLocalIsDeepSeekR1Qwen(options.model);
-    var fallbackWindow = isDeepSeek ? 131072 : (isQwen3 ? 40960 : 4096);
-    var configuredWindow = generator.model && generator.model.config.max_position_embeddings || fallbackWindow;
-    var contextWindow = Math.min(configuredWindow, parameterSettings.contextWindow);
-    generationOptions.max_new_tokens = Math.min(generationOptions.max_new_tokens, Math.max(16, contextWindow - 128));
+    if (jaaLocalSupportsReasoning(options.model)) generationOptions.tokenizer_encode_kwargs = { enable_thinking: parameterSettings.enableThinking };
+    var contextWindow = parameterSettings.contextWindow;
     var limit = contextWindow - generationOptions.max_new_tokens;
+    if (limit <= 0) throw new Error("The context window must be larger than the output limit so the prompt has room.");
     if (generator.tokenizer && generator.tokenizer.apply_chat_template) {
-      var countTokens = function () { return generator.tokenizer.apply_chat_template(conversation, { tokenize: true, add_generation_prompt: true }).length; };
+      var countTokens = function () { return generator.tokenizer.apply_chat_template(conversation, Object.assign({ tokenize: true, add_generation_prompt: true }, generationOptions.tokenizer_encode_kwargs)).length; };
       while (countTokens() > limit && conversation.length > 2) {
         conversation.splice(1, 1);
         while (conversation.length > 2 && conversation[1].role !== "user") conversation.splice(1, 1);
       }
-      if (countTokens() > limit) throw new Error("This message and its attachments exceed the local model's context limit. Shorten the message or turn off an attachment.");
+      var promptTokens = countTokens();
+      if (promptTokens >= contextWindow) throw new Error("This message and its attachments exceed the local model's context limit. Shorten the message or turn off an attachment.");
+      // A maximum output setting cannot include the prompt tokens. Use the
+      // remaining model context rather than rejecting an otherwise valid prompt.
+      generationOptions.max_new_tokens = Math.min(generationOptions.max_new_tokens, contextWindow - promptTokens);
     }
     await generator(conversation, Object.assign({}, generationOptions, {
       streamer: streamer,
@@ -326,5 +410,6 @@ if (typeof window !== "undefined") {
   window.jaaLocalFriendlyError = jaaLocalFriendlyError;
   window.jaaLocalRevision = jaaLocalRevision;
   window.isLocalRuntimeAvailable = isLocalRuntimeAvailable;
+  window.listCachedLocalModels = listCachedLocalModels;
   window.unloadLocalLlm = unloadLocalLlm;
 }

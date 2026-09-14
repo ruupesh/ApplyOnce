@@ -7,7 +7,7 @@ profile blob the content script reads on every page load.
 */
 
 var JAA_LLM_STORAGE_KEY = "jaaLLM";
-var JAA_LLM_MAX_MESSAGES = 40;
+var JAA_LLM_MAX_MESSAGES = 80;
 var JAA_LLM_LOCAL_MESSAGE_BUDGET = 8000;
 
 // One entry per provider. `kind` picks the wire adapter, so the three
@@ -61,39 +61,17 @@ var JAA_LLM_PROVIDERS = [
   }
 ];
 
-// Small ONNX chat models. Downloads vary with quantization and model revision.
+// Only the on-device models offered in the picker. Downloads vary by export.
 var JAA_LLM_LOCAL_MODELS = [
-  {
-    id: "onnx-community/SmolLM2-360M-Instruct-ONNX",
-    label: "SmolLM2 360M",
-    size: "~390 MB",
-    note: "Best all-round balance. Recommended."
-  },
-  {
-    id: "onnx-community/gemma-3-270m-it-ONNX",
-    label: "Gemma 3 270M",
-    size: "~330 MB",
-    note: "For short, specific tasks."
-  },
-  {
-    id: "onnx-community/Qwen2.5-0.5B-Instruct",
-    label: "Qwen2.5 0.5B",
-    size: "~790 MB",
-    note: "A larger alternative for writing tasks."
-  },
-  {
-    id: "onnx-community/Qwen3-0.6B-ONNX",
-    label: "Qwen3 0.6B",
-    size: "~930 MB",
-    note: "Reasoning model. Internal thinking is hidden; final answers support Markdown."
-  },
-  {
-    id: "onnx-community/DeepSeek-R1-Distill-Qwen-1.5B-ONNX",
-    label: "DeepSeek R1 Qwen 1.5B",
-    size: "~1.37 GB",
-    note: "Larger reasoning model. Uses the compatible GQA revision on WebGPU."
-  }
+  { id: "onnx-community/Llama-3.2-3B-Instruct-ONNX" },
+  { id: "onnx-community/Qwen3-4B-ONNX" },
+  { id: "onnx-community/gemma-4-E4B-it-ONNX" },
+  { id: "onnx-community/gemma-4-E2B-it-ONNX" }
 ];
+
+function jaaLlmIsListedLocalModel(modelId) {
+  return JAA_LLM_LOCAL_MODELS.some(function (model) { return model.id === modelId; });
+}
 
 function jaaLlmDefaults() {
   return {
@@ -101,10 +79,14 @@ function jaaLlmDefaults() {
     keys: {},
     apiModels: {},
     localModel: JAA_LLM_LOCAL_MODELS[0].id,
+    localModelHistory: [],
     localDtype: "q4",
     localParameters: {},
     context: { profile: true, resume: false, applications: false, page: false },
-    messages: []
+    messages: [],
+    agentMode: "auto",
+    maxAgentIterations: 10,
+    autoApplyReads: true
   };
 }
 
@@ -125,7 +107,12 @@ async function getLlmSettings() {
   if (jaaLlmProvider(stored.provider).id === stored.provider) settings.provider = stored.provider;
   if (stored.keys && typeof stored.keys === "object") settings.keys = stored.keys;
   if (stored.apiModels && typeof stored.apiModels === "object") settings.apiModels = stored.apiModels;
-  if (stored.localModel) settings.localModel = stored.localModel;
+  if (jaaLlmIsListedLocalModel(stored.localModel)) settings.localModel = stored.localModel;
+  if (Array.isArray(stored.localModelHistory)) {
+    stored.localModelHistory.forEach(function (modelId) {
+      jaaLlmRememberLocalModel(settings, modelId);
+    });
+  }
   // Migrate the prototype's fp16 quantization, which produced corrupt output
   // with the bundled WebGPU backend on tested devices.
   if (stored.localDtype && stored.localDtype !== "q4f16") settings.localDtype = stored.localDtype;
@@ -138,6 +125,7 @@ async function getLlmSettings() {
         if (typeof source[name] === "number" && isFinite(source[name])) clean[name] = source[name];
       });
       if (typeof source.doSample === "boolean") clean.doSample = source.doSample;
+      if (typeof source.enableThinking === "boolean") clean.enableThinking = source.enableThinking;
       settings.localParameters[modelId] = clean;
     });
   }
@@ -146,13 +134,30 @@ async function getLlmSettings() {
       if (typeof stored.context[name] === "boolean") settings.context[name] = stored.context[name];
     });
   }
+  if (typeof stored.agentMode === "string" && ["auto", "always", "never"].indexOf(stored.agentMode) !== -1) {
+    settings.agentMode = stored.agentMode;
+  }
+  if (typeof stored.maxAgentIterations === "number" && stored.maxAgentIterations >= 1 && stored.maxAgentIterations <= 20) {
+    settings.maxAgentIterations = Math.round(stored.maxAgentIterations);
+  }
+  if (typeof stored.autoApplyReads === "boolean") settings.autoApplyReads = stored.autoApplyReads;
   settings.messages = jaaLlmMessages(stored.messages);
   return settings;
 }
 
+function jaaLlmRememberLocalModel(settings, modelId) {
+  if (!jaaLlmIsListedLocalModel(modelId)) return;
+  if (!Array.isArray(settings.localModelHistory)) settings.localModelHistory = [];
+  modelId = modelId.trim();
+  if (settings.localModelHistory.indexOf(modelId) === -1) settings.localModelHistory.push(modelId);
+}
+
 function jaaLlmMessages(messages) {
   var result = (Array.isArray(messages) ? messages : []).filter(function (message) {
-    return message && (message.role === "user" || message.role === "assistant") && typeof message.content === "string";
+    if (!message) return false;
+    // Support tool call and tool result messages in transcripts.
+    if (message.role === "tool") return typeof message.content === "string" && typeof message.toolCallId === "string";
+    return (message.role === "user" || message.role === "assistant") && typeof message.content === "string";
   }).slice(-JAA_LLM_MAX_MESSAGES);
   while (result.length && result[0].role !== "user") result.shift();
   return result;
@@ -197,13 +202,31 @@ function jaaLlmActiveModel(settings) {
   return settings.apiModels[provider.id] || (provider.models || [])[0] || "";
 }
 
+// Whether a provider supports native tool/function calling.
+function jaaLlmProviderSupportsTools(providerId) {
+  var provider = jaaLlmProvider(providerId);
+  return provider.kind !== "local";
+}
+
+// The effective agent mode for a given provider.
+function jaaLlmEffectiveAgentMode(settings) {
+  if (settings.agentMode === "never") return "never";
+  if (settings.agentMode === "always") return "always";
+  // "auto": enable for hosted providers, disable for local.
+  var provider = jaaLlmProvider(settings.provider);
+  return provider.kind === "local" ? "never" : "always";
+}
+
 if (typeof window !== "undefined") {
   window.getLlmSettings = getLlmSettings;
   window.setLlmSettings = setLlmSettings;
   window.jaaLlmDefaults = jaaLlmDefaults;
+  window.jaaLlmIsListedLocalModel = jaaLlmIsListedLocalModel;
   window.jaaLlmProvider = jaaLlmProvider;
   window.jaaLlmActiveModel = jaaLlmActiveModel;
   window.jaaLlmLocalMessages = jaaLlmLocalMessages;
+  window.jaaLlmProviderSupportsTools = jaaLlmProviderSupportsTools;
+  window.jaaLlmEffectiveAgentMode = jaaLlmEffectiveAgentMode;
   window.JAA_LLM_PROVIDERS = JAA_LLM_PROVIDERS;
   window.JAA_LLM_LOCAL_MODELS = JAA_LLM_LOCAL_MODELS;
 }

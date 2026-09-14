@@ -206,13 +206,19 @@
         <div class="llmParameterGrid">
           <label>
             Context window
-            <input type="number" id="llmContextWindow" min="512" step="128" inputmode="numeric" />
-            <small>Maximum prompt and reply tokens held by the local model.</small>
+            <span class="llmLimitControl">
+              <input type="number" id="llmContextWindow" step="1" inputmode="numeric" />
+              <button type="button" class="secondary" id="llmMaxContext">Max</button>
+            </span>
+            <small>Prompt and reply token budget. Max fills the model's published context length; manual values remain editable.</small>
           </label>
           <label>
             Output limit
-            <input type="number" id="llmMaxNewTokens" min="16" step="16" inputmode="numeric" />
-            <small>Maximum new tokens generated for one response.</small>
+            <span class="llmLimitControl">
+              <input type="number" id="llmMaxNewTokens" min="16" step="1" inputmode="numeric" />
+              <button type="button" class="secondary" id="llmMaxOutput">Max</button>
+            </span>
+            <small>Max uses the remaining selected context; the prompt also needs tokens.</small>
           </label>
           <label>
             Temperature
@@ -238,6 +244,10 @@
         <label class="llmSamplingToggle">
           <input type="checkbox" id="llmDoSample" />
           Use sampling
+        </label>
+        <label class="llmSamplingToggle" id="llmThinkingToggle">
+          <input type="checkbox" id="llmEnableThinking" />
+          Reasoning mode
         </label>
         <div class="llmParameterFooter">
           <button type="button" class="secondary" id="llmResetParameters">Reset model defaults</button>

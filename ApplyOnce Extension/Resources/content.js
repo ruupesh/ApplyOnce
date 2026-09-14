@@ -79,6 +79,15 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
           sendResponse({ ok: false, error: String((error && error.message) || error) });
         });
         return true;
+      } else if (msg.type === "JAA_AGENT_GET_VALIDATION") {
+        sendResponse(getAgentValidation());
+      } else if (msg.type === "JAA_AGENT_CLICK_ELEMENT") {
+        agentClickElement(msg).then(sendResponse).catch(function (error) {
+          sendResponse({ ok: false, error: String((error && error.message) || error) });
+        });
+        return true;
+      } else if (msg.type === "JAA_AGENT_SCROLL_TO") {
+        sendResponse(agentScrollTo(msg));
       }
       return false; // always responded synchronously above
     });
@@ -2431,7 +2440,13 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
   // for non-sensitive fields and the form is never submitted.
   function getAgentFormSnapshot() {
     var items = getPageFieldInventory();
-    return { ok: true, title: document.title || location.hostname, url: location.href, fields: items.slice(0, 120) };
+    // Enhance with validation and visibility state for the agent loop.
+    items.forEach(function (item) {
+      // Note: items don't directly reference DOM elements, so validation
+      // is gathered separately via JAA_AGENT_GET_VALIDATION.
+      item.isVisible = true; // All items from getPageFieldInventory are already filtered to visible.
+    });
+    return { ok: true, title: document.title || location.hostname, url: location.href, fields: items.slice(0, 200) };
   }
 
   async function agentFillForm() {
@@ -2481,7 +2496,11 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
       var old = beforeByRef[field.ref];
       if ((!old || !old.current) && field.current) filled.push(field.label);
     });
-    return { ok: true, title: after.title, url: after.url, filled: filled, filledCount: filled.length, fields: after.fields };
+    var failed = [];
+    after.fields.forEach(function (field) {
+      if (field.empty && field.fillable) failed.push(field.label);
+    });
+    return { ok: true, title: after.title, url: after.url, filled: filled, filledCount: filled.length, failed: failed, failedCount: failed.length, fields: after.fields };
   }
 
   async function ensureWorkdayAgentSections(requested) {
@@ -2592,7 +2611,14 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
       scanAndFill(true);
       await new Promise(function (resolve) { setTimeout(resolve, 1600); });
     }
-    return { ok: true, updated: updated, updatedCount: updated.length, fields: getPageFieldInventory() };
+    var afterFields = getPageFieldInventory();
+    var results = requested.map(function (change) {
+      var wasUpdated = updated.some(function (label) {
+        return normalizeLabel(label) === normalizeLabel(change.field.replace(/_/g, " "));
+      });
+      return { field: change.field, status: wasUpdated ? "filled" : "skipped", value: change.value };
+    });
+    return { ok: true, updated: updated, updatedCount: updated.length, results: results, fields: afterFields };
   }
 
   // ---------- Saving (fills the profile, including brand-new fields) ----------
@@ -2835,6 +2861,133 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
       title: String(title || "").slice(0, 160),
       reqId: String(fromUrl.reqId || "").slice(0, 60)
     };
+  }
+
+  // ---------- Agent validation and interaction ----------
+
+  function getAgentValidation() {
+    var fieldErrors = [];
+    var pageErrors = [];
+    getFormFields().forEach(function (el) {
+      var aliases = getElementLabelAliases(el);
+      var label = aliases[0];
+      if (!label || SENSITIVE_LABEL_RE.test(label)) return;
+      if (!el.checkValidity || el.checkValidity()) return;
+      var message = el.validationMessage || "Invalid value";
+      fieldErrors.push({
+        label: label,
+        ref: getAgentFieldRef(el, label),
+        message: message,
+        required: isRequiredControl(el, label)
+      });
+    });
+    // Scan for visible error elements on the page.
+    var errorSelectors = [
+      '[role="alert"]',
+      '[aria-invalid="true"]',
+      '.error-message',
+      '.validation-error',
+      '.field-error',
+      '[data-automation-id*="error"]',
+      '[data-automation-id*="Error"]'
+    ];
+    var errorElements = document.querySelectorAll(errorSelectors.join(", "));
+    Array.prototype.forEach.call(errorElements, function (el) {
+      var rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      var text = cleanText(el.textContent).slice(0, 300);
+      if (!text) return;
+      if (pageErrors.some(function (existing) { return existing.text === text; })) return;
+      pageErrors.push({ text: text, selector: el.tagName.toLowerCase() + (el.className ? "." + String(el.className).split(/\s+/)[0] : "") });
+    });
+    return { ok: true, fieldErrors: fieldErrors, pageErrors: pageErrors };
+  }
+
+  var JAA_AGENT_SAFE_CLICK_ROLES = ["button", "link", "tab", "menuitem", "option", "switch", "checkbox"];
+  var JAA_AGENT_CLICK_BLOCKED_RE = /\b(submit\s+application|confirm\s+submission|pay\s+now|place\s+order|delete|remove\s+all)\b/i;
+
+  async function agentClickElement(msg) {
+    var text = String(msg.text || "").trim();
+    var role = msg.role || "";
+    var selector = msg.selector || "";
+    if (!text && !selector) return { ok: false, error: "No text or selector provided." };
+
+    // Find candidate elements.
+    var candidates = [];
+    var scope = document;
+
+    if (selector) {
+      try {
+        var bySelector = scope.querySelectorAll(selector);
+        Array.prototype.forEach.call(bySelector, function (el) { candidates.push(el); });
+      } catch (e) { /* invalid selector, fall through to text match */ }
+    }
+
+    if (text) {
+      // Search clickable elements by text content.
+      var clickableSelectors = "button, a, [role='button'], [role='link'], [role='tab'], [role='menuitem'], input[type='button'], input[type='submit'], summary";
+      var allClickable = scope.querySelectorAll(clickableSelectors);
+      var normalizedText = text.toLowerCase().trim();
+      Array.prototype.forEach.call(allClickable, function (el) {
+        var elText = cleanText(el.textContent || el.value || el.getAttribute("aria-label") || el.title || "").toLowerCase();
+        if (elText === normalizedText || elText.indexOf(normalizedText) !== -1) {
+          if (candidates.indexOf(el) === -1) candidates.push(el);
+        }
+      });
+    }
+
+    // Filter to visible, safe elements.
+    candidates = candidates.filter(function (el) {
+      var rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return false;
+      // Role filter if specified.
+      if (role) {
+        var elRole = el.getAttribute("role") || el.tagName.toLowerCase();
+        if (elRole === "a") elRole = "link";
+        if (elRole !== role && JAA_AGENT_SAFE_CLICK_ROLES.indexOf(elRole) === -1) return false;
+      }
+      return true;
+    });
+
+    if (!candidates.length) return { ok: false, error: "No matching clickable element found for: " + (text || selector) };
+
+    var target = candidates[0];
+    // Safety: block dangerous actions.
+    var targetText = cleanText(target.textContent || target.value || "");
+    if (JAA_AGENT_CLICK_BLOCKED_RE.test(targetText)) {
+      return { ok: false, error: "Blocked: clicking '" + targetText.slice(0, 60) + "' is not allowed. ApplyOnce never submits forms or triggers destructive actions." };
+    }
+    // Block actual form submission.
+    if (target.type === "submit" && target.closest("form")) {
+      return { ok: false, error: "Blocked: cannot click submit buttons. ApplyOnce never submits forms." };
+    }
+
+    realClick(target);
+    await new Promise(function (resolve) { setTimeout(resolve, 500); });
+    return { ok: true, clicked: targetText.slice(0, 100), tag: target.tagName.toLowerCase() };
+  }
+
+  function agentScrollTo(msg) {
+    var ref = msg.ref || "";
+    var selector = msg.selector || "";
+    var target = null;
+
+    if (ref) {
+      // Find by field ref — search form fields.
+      getFormFields().forEach(function (el) {
+        if (target) return;
+        var aliases = getElementLabelAliases(el);
+        var label = aliases[0];
+        if (getAgentFieldRef(el, label) === ref || slugify(label) === ref) target = el;
+      });
+    }
+    if (!target && selector) {
+      try { target = document.querySelector(selector); } catch (e) {}
+    }
+    if (!target) return { ok: false, error: "Element not found for scrolling." };
+
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    return { ok: true, scrolledTo: ref || selector };
   }
 
   // ---------- Page text, for the assistant ----------

@@ -286,10 +286,208 @@ async function jaaAgentApplyActions(plan) {
   return { updatedCount: updates.length, pageUpdate: pageUpdate, form: form };
 }
 
+async function jaaAgentObserve(tabId) {
+  var observation = { filled: [], failed: [], errors: [], emptyRequired: [] };
+  try {
+    var form = await jaaBrowser.tabs.sendMessage(tabId, { type: "JAA_AGENT_INSPECT_FORM" }, { frameId: 0 });
+    if (form && form.ok && form.fields) {
+      form.fields.forEach(function (field) {
+        if (field.current) observation.filled.push(field.label);
+        else if (field.fillable) observation.failed.push(field.label);
+        if (field.empty && field.required) observation.emptyRequired.push(field.label);
+      });
+    }
+  } catch (error) { /* page may have navigated */ }
+  try {
+    var validation = await jaaBrowser.tabs.sendMessage(tabId, { type: "JAA_AGENT_GET_VALIDATION" }, { frameId: 0 });
+    if (validation && validation.ok) {
+      observation.errors = (validation.fieldErrors || []).concat(
+        (validation.pageErrors || []).map(function (err) { return { label: err.text, message: err.text }; })
+      );
+    }
+  } catch (error) { /* validation check optional */ }
+  return observation;
+}
+
+var JAA_AGENT_MAX_ITERATIONS = 10;
+
+async function jaaAgentLoop(options) {
+  var tabId = options.tabId;
+  var maxIter = options.maxIterations || JAA_AGENT_MAX_ITERATIONS;
+  var iteration = 0;
+  var agentMessages = options.messages.slice();
+  var allWriteActions = [];
+  var done = false;
+
+  while (iteration < maxIter && !done) {
+    iteration++;
+    if (options.signal) options.signal.throwIfAborted();
+    if (options.onStep) options.onStep({ iteration: iteration, maxIterations: maxIter, status: "thinking" });
+
+    // Call LLM with tools.
+    var response = await sendToLlmWithTools({
+      providerId: options.providerId,
+      key: options.key,
+      model: options.model,
+      system: options.system,
+      messages: agentMessages,
+      tools: options.tools,
+      signal: options.signal,
+      onDelta: options.onDelta
+    });
+
+    var text = response.text || "";
+    var toolCalls = response.toolCalls || [];
+
+    // No tool calls — the model is responding with text only.
+    if (!toolCalls.length) {
+      // Check if the text contains XML actions (fallback for local models).
+      var xmlActions = jaaAgentExtractActions(text, "");
+      if (xmlActions.actions.length) {
+        allWriteActions = allWriteActions.concat(xmlActions.actions);
+        text = xmlActions.text;
+      }
+      done = true;
+      return { text: text, writeActions: allWriteActions, iterations: iteration, done: true };
+    }
+
+    // Record assistant message with tool calls.
+    if (text) {
+      agentMessages.push({ role: "assistant", content: text });
+    }
+
+    // Process each tool call.
+    var hasWriteTools = false;
+    var writeToolCalls = [];
+    for (var i = 0; i < toolCalls.length; i++) {
+      var tc = toolCalls[i];
+      if (options.signal) options.signal.throwIfAborted();
+
+      if (tc.name === "done") {
+        done = true;
+        return {
+          text: text || (tc.args && tc.args.summary) || "Task complete.",
+          writeActions: allWriteActions,
+          iterations: iteration,
+          done: true
+        };
+      }
+
+      if (jaaLlmIsWriteTool(tc.name)) {
+        hasWriteTools = true;
+        writeToolCalls.push(tc);
+        // Convert tool calls to legacy action format for the review card.
+        if (tc.name === "set_fields" && tc.args && tc.args.fields) {
+          tc.args.fields.forEach(function (fieldPair) {
+            allWriteActions.push({ type: "set_field", field: fieldPair.field, value: fieldPair.value });
+          });
+        } else if (tc.name === "fill_form") {
+          if (!allWriteActions.some(function (a) { return a.type === "fill_form"; })) {
+            allWriteActions.push({ type: "fill_form" });
+          }
+        } else if (tc.name === "click_element") {
+          allWriteActions.push({ type: "click_element", text: tc.args && tc.args.text || "", role: tc.args && tc.args.role || "" });
+        }
+        continue;
+      }
+
+      // Read-only tool — execute immediately.
+      if (options.onStep) options.onStep({ iteration: iteration, maxIterations: maxIter, status: "tool", tool: tc.name });
+      var result;
+      try {
+        result = await jaaLlmExecuteToolCall(tc.name, tc.args, tabId);
+      } catch (error) {
+        result = "Error executing " + tc.name + ": " + String((error && error.message) || error);
+      }
+
+      // Add tool result to conversation for the next turn.
+      agentMessages.push({
+        role: "tool",
+        content: typeof result === "string" ? result : JSON.stringify(result),
+        toolCallId: tc.id,
+        name: tc.name
+      });
+    }
+
+    // If there are write tools, pause and return them for review.
+    if (hasWriteTools) {
+      done = true;
+      return {
+        text: text || "I need to make changes to the form. Please review the proposed actions.",
+        writeActions: jaaAgentValidateActions(allWriteActions),
+        iterations: iteration,
+        done: false,
+        pendingMessages: agentMessages
+      };
+    }
+  }
+
+  // Max iterations reached.
+  return {
+    text: text || "I've reached the maximum number of reasoning steps. Here's what I have so far.",
+    writeActions: allWriteActions,
+    iterations: iteration,
+    done: true
+  };
+}
+
+// Resume the agent loop after write actions have been applied.
+async function jaaAgentResumeLoop(options) {
+  var tabId = options.tabId;
+  var agentMessages = options.messages.slice();
+
+  // Observe the result of applied actions.
+  var observation = await jaaAgentObserve(tabId);
+  var summary = [];
+  if (observation.filled.length) summary.push("Filled: " + observation.filled.join(", "));
+  if (observation.failed.length) summary.push("Still empty (has saved value): " + observation.failed.join(", "));
+  if (observation.emptyRequired.length) summary.push("Required but empty: " + observation.emptyRequired.join(", "));
+  if (observation.errors.length) {
+    summary.push("Validation errors: " + observation.errors.map(function (e) { return e.label + " - " + e.message; }).join("; "));
+  }
+  var observationText = summary.length ? summary.join("\n") : "All actions applied successfully. No validation errors detected.";
+
+  // Add the observation as a tool result.
+  agentMessages.push({
+    role: "tool",
+    content: "Actions applied. Observation:\n" + observationText,
+    toolCallId: "post-apply-" + Date.now(),
+    name: "fill_form"
+  });
+
+  // Continue the agent loop.
+  return jaaAgentLoop(Object.assign({}, options, { messages: agentMessages }));
+}
+
+function jaaAgentAgenticSystemInstructions() {
+  return (
+    "\n\n# Agent mode\n" +
+    "You are in Agent mode. You have tools available to inspect forms, fill fields, check validation errors, and navigate pages.\n" +
+    "Follow this workflow:\n" +
+    "1. Call inspect_form to understand the current page state.\n" +
+    "2. Call get_profile and/or get_resume to understand what data is available.\n" +
+    "3. Use fill_form to fill all matching fields, or set_fields for specific values.\n" +
+    "4. After filling, call get_validation_errors to check for problems.\n" +
+    "5. If there are errors, use set_fields to fix them.\n" +
+    "6. Call done when the task is complete.\n\n" +
+    "Important rules:\n" +
+    "- Never set passwords, government IDs, banking/payment data, or file fields.\n" +
+    "- Never click submit buttons or submit forms.\n" +
+    "- Use fill_form for bulk filling and set_fields for targeted corrections.\n" +
+    "- Use click_element only for navigation (Next, Continue, Save) buttons, never for submission.\n" +
+    "- Always explain what you are doing before calling tools.\n" +
+    "- The user reviews and approves all write actions before execution."
+  );
+}
+
 if (typeof window !== "undefined") {
   window.jaaAgentExtractActions = jaaAgentExtractActions;
   window.jaaAgentExtractResumeActions = jaaAgentExtractResumeActions;
   window.jaaAgentAsksForMissingPageFields = jaaAgentAsksForMissingPageFields;
   window.jaaAgentDescribeActions = jaaAgentDescribeActions;
   window.jaaAgentApplyActions = jaaAgentApplyActions;
+  window.jaaAgentLoop = jaaAgentLoop;
+  window.jaaAgentResumeLoop = jaaAgentResumeLoop;
+  window.jaaAgentObserve = jaaAgentObserve;
+  window.jaaAgentAgenticSystemInstructions = jaaAgentAgenticSystemInstructions;
 }

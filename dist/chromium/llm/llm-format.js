@@ -3,6 +3,28 @@
 
 function jaaLlmSplitReasoning(value) {
   var text = String(value || "");
+  var gemmaOpen = text.indexOf("<|channel>thought");
+  var gemmaClose = text.indexOf("<channel|>");
+  function gemmaAnswer(value) { return value.replace(/(?:<turn\|>|<\|turn\|>|<\|eos\|>)\s*$/, "").trim(); }
+  if (gemmaOpen !== -1) {
+    var lineEnd = text.indexOf("\n", gemmaOpen);
+    var start = lineEnd === -1 ? text.length : lineEnd + 1;
+    if (gemmaClose === -1 || gemmaClose < start) {
+      return { answer: gemmaAnswer(text.slice(0, gemmaOpen)), reasoning: text.slice(start).trim(), thinking: true, incomplete: true };
+    }
+    return {
+      answer: gemmaAnswer(text.slice(0, gemmaOpen) + text.slice(gemmaClose + 10)),
+      reasoning: text.slice(start, gemmaClose).trim(),
+      thinking: false,
+      incomplete: false
+    };
+  }
+  if (text.startsWith("<|channel") && gemmaClose === -1) {
+    return { answer: "", reasoning: "", thinking: true, incomplete: true };
+  }
+  if (gemmaClose !== -1) {
+    return { answer: gemmaAnswer(text.slice(gemmaClose + 10)), reasoning: text.slice(0, gemmaClose).trim(), thinking: false, incomplete: false };
+  }
   var open = text.indexOf("<think>");
   var close = text.indexOf("</think>");
   if (open !== -1) {
@@ -20,7 +42,7 @@ function jaaLlmSplitReasoning(value) {
   if (close !== -1) {
     return { answer: text.slice(close + 8).trim(), reasoning: text.slice(0, close).trim(), thinking: false, incomplete: false };
   }
-  return { answer: text.trim(), reasoning: "", thinking: false, incomplete: false };
+  return { answer: gemmaAnswer(text), reasoning: "", thinking: false, incomplete: false };
 }
 
 function jaaMarkdownAppendInline(parent, source) {

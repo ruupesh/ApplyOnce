@@ -14,7 +14,8 @@ its <script> tags, and the Assistant tab button — nothing else references it.
     { label: "Draft an answer", text: "Draft an answer to this application question: " },
     { label: "Follow-up email", text: "Write a short, polite follow-up email for my most recent application." },
     { label: "Tailor to company", text: "Tailor my saved answers to the company on this page." },
-    { label: "Review my search", text: "Summarise my applications and tell me which need a follow-up." }
+    { label: "Review my search", text: "Summarise my applications and tell me which need a follow-up." },
+    { label: "Agent: fill form", text: "[agent] Inspect this form, fill all fields using my profile and resume, and report what was filled and what needs attention." }
   ];
 
   var CUSTOM_OPTION = "__custom__";
@@ -28,6 +29,11 @@ its <script> tags, and the Assistant tab button — nothing else references it.
   var currentSend = null;
   var clearedMessages = null;
   var pendingPlan = null;
+  var agentLoopActive = false;
+  var agentPendingMessages = null;
+  var progressLoaded = 0;
+  var progressTotal = 0;
+  var progressPercent = 0;
 
   var dom = {};
 
@@ -65,13 +71,13 @@ its <script> tags, and the Assistant tab button — nothing else references it.
     var current = jaaLlmActiveModel(settings);
     var known = isLocal
       ? JAA_LLM_LOCAL_MODELS.map(function (model) {
-          return { id: model.id, label: model.label + " · " + model.size, note: model.note };
+          return { id: model.id, label: model.id };
         })
       : (provider.models || []).map(function (id) {
           return { id: id, label: id };
         });
 
-    if (!known.some(function (model) { return model.id === current; }) && current) {
+    if (!isLocal && !known.some(function (model) { return model.id === current; }) && current) {
       known = known.concat([{ id: current, label: current }]);
     }
 
@@ -83,13 +89,15 @@ its <script> tags, and the Assistant tab button — nothing else references it.
       if (model.id === current) option.selected = true;
       dom.model.appendChild(option);
     });
-    var custom = el("option", null, isLocal ? "Other Hugging Face model…" : "Other model…");
-    custom.value = CUSTOM_OPTION;
-    dom.model.appendChild(custom);
+    if (!isLocal) {
+      var custom = el("option", null, "Other model…");
+      custom.value = CUSTOM_OPTION;
+      dom.model.appendChild(custom);
+    }
     dom.modelInfo.hidden = !isLocal;
     dom.removeModel.hidden = !isLocal;
     dom.modelInfo.textContent = runtimeAvailable
-      ? "Downloaded on first send, then cached on this device. Sizes are approximate; working memory is higher. Long attachments and older chat turns are shortened to fit. Other models must be compatible ONNX text-generation models."
+      ? "Downloaded on first send, then kept in this browser's Cache Storage (transformers-cache), within the browser profile on this Mac. Switching models releases RAM but keeps cached files; Remove selected model download deletes them."
       : "This build does not include on-device support. Choose an API provider to chat.";
     renderParameters();
   }
@@ -99,35 +107,46 @@ its <script> tags, and the Assistant tab button — nothing else references it.
     dom.parameters.hidden = !local;
     if (!local) return;
     var modelId = settings.localModel;
-    var bounds = jaaLocalParameterBounds(modelId);
     var saved = settings.localParameters && settings.localParameters[modelId];
     var values = jaaLocalParameterSettings(modelId, saved);
-    dom.contextWindow.min = bounds.contextMin;
-    dom.contextWindow.max = bounds.contextMax;
     dom.contextWindow.value = values.contextWindow;
+    var bounds = jaaLocalParameterBounds(modelId);
+    dom.maxContext.disabled = busy || !bounds.contextMax;
+    dom.maxOutput.disabled = busy || !bounds.contextMax;
     dom.maxNewTokens.min = bounds.outputMin;
-    dom.maxNewTokens.max = Math.min(bounds.outputMax, values.contextWindow - 128);
+    dom.maxNewTokens.max = bounds.outputMax;
     dom.maxNewTokens.value = values.maxNewTokens;
     dom.doSample.checked = values.doSample;
+    var supportsReasoning = jaaLocalSupportsReasoning(modelId);
+    dom.thinkingToggle.classList.toggle("isDisabled", !supportsReasoning);
+    dom.thinkingToggle.title = supportsReasoning ? "" : "This model does not offer a thinking-mode switch.";
+    dom.enableThinking.checked = !!values.enableThinking;
     dom.temperature.value = values.temperature;
     dom.topP.value = values.topP;
     dom.topK.value = values.topK;
     dom.repetitionPenalty.value = values.repetitionPenalty;
     dom.parameterInputs.forEach(function (input) { input.disabled = busy; });
+    dom.enableThinking.disabled = busy || !supportsReasoning;
     dom.temperature.disabled = busy || !values.doSample;
     dom.topP.disabled = busy || !values.doSample;
     dom.topK.disabled = busy || !values.doSample;
     dom.resetParameters.disabled = busy;
     dom.parameterStatus.textContent = status ||
-      "Selectable limits: " + bounds.contextMax.toLocaleString() + " context, " + bounds.outputMax.toLocaleString() + " output tokens. The model's own architecture may support less.";
+      "Published context: " + (bounds.contextMax ? bounds.contextMax.toLocaleString() : "unknown") + " tokens. Max output depends on prompt length; very large settings may exhaust browser memory.";
   }
 
   async function saveParameters() {
     var modelId = settings.localModel;
+    var contextWindow = Number(dom.contextWindow.value);
+    if (!Number.isSafeInteger(contextWindow) || contextWindow <= 0) {
+      dom.parameterStatus.textContent = "Enter a positive whole number for the context window.";
+      return;
+    }
     var values = jaaLocalParameterSettings(modelId, {
-      contextWindow: Number(dom.contextWindow.value),
+      contextWindow: contextWindow,
       maxNewTokens: Number(dom.maxNewTokens.value),
       doSample: dom.doSample.checked,
+      enableThinking: dom.enableThinking.checked,
       temperature: Number(dom.temperature.value),
       topP: Number(dom.topP.value),
       topK: Number(dom.topK.value),
@@ -229,17 +248,47 @@ its <script> tags, and the Assistant tab button — nothing else references it.
     dom.keysPanel.appendChild(note);
   }
 
-  function bubble(role, text) {
+  function renderReasoning(node, separated, complete) {
+    var panel = node.querySelector(".llmReasoning");
+    if (!panel) return;
+    if (!separated.reasoning && !separated.thinking) {
+      panel.hidden = true;
+      return;
+    }
+    if (panel.hidden) {
+      panel.hidden = false;
+      panel.open = !complete;
+    }
+    panel.querySelector("summary").textContent = complete ? "Reasoning" : "Reasoning…";
+    panel.querySelector(".llmReasoningText").textContent = separated.reasoning || "Reasoning…";
+    if (complete) panel.open = false;
+  }
+
+  function renderAssistantParts(node, separated, complete) {
+    renderReasoning(node, separated, complete);
+    var target = node.querySelector(".llmText");
+    if (separated.answer) jaaRenderMarkdown(target, separated.answer);
+    else target.textContent = separated.thinking ? "Preparing answer…" : "";
+  }
+
+  function bubble(role, text, reasoning) {
     var node = el("div", "llmMsg " + role);
     node.appendChild(el("div", "llmRole", role === "user" ? "You" : "Assistant"));
+    if (role === "assistant") {
+      var panel = el("details", "llmReasoning");
+      panel.hidden = true;
+      panel.appendChild(el("summary", null, "Reasoning"));
+      panel.appendChild(el("div", "llmReasoningText"));
+      node.appendChild(panel);
+    }
     var content = el("div", "llmText");
+    if (role !== "assistant") content.textContent = text;
+    node.appendChild(content);
     if (role === "assistant") {
       var separated = jaaLlmSplitReasoning(text);
-      jaaRenderMarkdown(content, separated.incomplete
-        ? "The model stopped while reasoning and did not produce a final answer. Try again with a shorter request or add `/no_think`."
-        : separated.answer);
-    } else content.textContent = text;
-    node.appendChild(content);
+      if (reasoning) separated.reasoning = reasoning;
+      renderAssistantParts(node, separated, true);
+    }
     return node;
   }
 
@@ -249,7 +298,7 @@ its <script> tags, and the Assistant tab button — nothing else references it.
     });
     dom.empty.hidden = settings.messages.length > 0;
     settings.messages.forEach(function (message) {
-      dom.transcript.appendChild(bubble(message.role, message.content));
+      dom.transcript.appendChild(bubble(message.role, message.content, message.reasoning));
     });
     dom.transcript.scrollTop = dom.transcript.scrollHeight;
   }
@@ -331,14 +380,43 @@ its <script> tags, and the Assistant tab button — nothing else references it.
 
   function showProgress(report) {
     dom.progress.hidden = false;
+    if (report.status === "loading") {
+      progressLoaded = 0;
+      progressTotal = 0;
+      progressPercent = 0;
+      dom.progress.classList.add("loading");
+      dom.progressFill.style.width = "0%";
+      dom.progressText.textContent = "Checking model files…";
+      return;
+    }
     if (report.status === "ready") {
+      dom.progress.classList.remove("loading");
       dom.progressFill.style.width = "100%";
       dom.progressText.textContent = "Model ready · preparing answer…";
       return;
     }
-    dom.progressFill.style.width = report.percent + "%";
-    dom.progressText.textContent =
-      "Downloading model · " + report.percent + "% (" + Math.round(report.total / 1048576) + " MB)";
+    if (report.status !== "progress" || !report.total) return;
+    progressLoaded = Math.max(progressLoaded, report.loaded);
+    progressTotal = Math.max(progressTotal, report.total, progressLoaded);
+    progressPercent = Math.max(progressPercent, Math.min(100, Math.round((progressLoaded / progressTotal) * 100)));
+    dom.progress.classList.remove("loading");
+    dom.progressFill.style.width = progressPercent + "%";
+    function size(bytes) {
+      return bytes >= 1073741824
+        ? (bytes / 1073741824).toFixed(2) + " GB"
+        : (bytes / 1048576).toFixed(1) + " MB";
+    }
+    dom.progressText.textContent = "Loading model files · " + size(progressLoaded) + " of " + size(progressTotal) + " (" + progressPercent + "%)";
+  }
+
+  function showAgentStep(step) {
+    dom.progress.hidden = false;
+    if (step.status === "thinking") {
+      dom.progressFill.style.width = Math.round((step.iteration / step.maxIterations) * 100) + "%";
+      dom.progressText.textContent = "Agent step " + step.iteration + "/" + step.maxIterations + " · reasoning…";
+    } else if (step.status === "tool") {
+      dom.progressText.textContent = "Agent step " + step.iteration + "/" + step.maxIterations + " · running " + step.tool + "…";
+    }
   }
 
   function missingPageRequestFrom(text) {
@@ -459,16 +537,16 @@ its <script> tags, and the Assistant tab button — nothing else references it.
             first = false;
           }
           var visible = jaaLlmSplitReasoning(streamedReply);
-          if (visible.thinking && !visible.answer) target.textContent = "Reasoning…";
-          else jaaRenderMarkdown(target, visible.answer);
+          renderAssistantParts(node, visible, false);
           dom.transcript.scrollTop = dom.transcript.scrollHeight;
         }
       });
 
       dom.progress.hidden = true;
       var separated = jaaLlmSplitReasoning(reply);
+      renderAssistantParts(node, separated, true);
       if (separated.incomplete) {
-        throw new Error("The model used its entire reply budget for reasoning before producing an answer. Try a shorter request or add /no_think.");
+        throw new Error("The model used its entire reply budget for reasoning before producing an answer. Increase the output limit or try a shorter request.");
       }
       reply = separated.answer;
       var agentReply = jaaAgentExtractActions(reply, text);
@@ -476,7 +554,7 @@ its <script> tags, and the Assistant tab button — nothing else references it.
       if (!reply.trim()) throw new Error("The model returned an empty answer. Try another model or a shorter message.");
       if (reply) {
         jaaRenderMarkdown(target, reply);
-        settings.messages.push({ role: "assistant", content: reply });
+        settings.messages.push({ role: "assistant", content: reply, reasoning: separated.reasoning });
         await setLlmSettings(settings);
         if (agentReply.actions.length) {
           var plan = await jaaAgentDescribeActions(agentReply.actions, pageTabId);
@@ -494,17 +572,213 @@ its <script> tags, and the Assistant tab button — nothing else references it.
     }
   }
 
+  async function sendAgentic(text) {
+    dom.chatStatus.hidden = true;
+    setBusy(true);
+    agentLoopActive = true;
+    controller = new AbortController();
+    settings.messages.push({ role: "user", content: text });
+    settings.messages = jaaLlmMessages(settings.messages);
+    renderTranscript();
+
+    var node = bubble("assistant", "");
+    var target = node.querySelector(".llmText");
+    target.textContent = "Agent starting…";
+    dom.transcript.appendChild(node);
+    dom.transcript.scrollTop = dom.transcript.scrollHeight;
+
+    try {
+      await setLlmSettings(settings);
+
+      // Get the web tab.
+      if (pageTabId === null) {
+        var tabs = await jaaBrowser.tabs.query({ lastFocusedWindow: true });
+        var webTab = (tabs || []).filter(function (tab) { return /^https?:/i.test(tab.url || ""); }).sort(function (a, b) {
+          return Number(!!b.active) - Number(!!a.active) || (b.lastAccessed || 0) - (a.lastAccessed || 0);
+        })[0];
+        if (webTab) pageTabId = webTab.id;
+      }
+      if (pageTabId === null) throw new Error("Open a webpage containing a form, then try again.");
+
+      var context = await buildLlmContext(settings.context, { pageTabId: pageTabId, providerId: settings.provider });
+      controller.signal.throwIfAborted();
+
+      var systemPrompt = jaaLlmSystemPrompt(context);
+      if (typeof jaaAgentAgenticSystemInstructions === "function") {
+        systemPrompt += jaaAgentAgenticSystemInstructions();
+      }
+
+      var loopResult = await jaaAgentLoop({
+        tabId: pageTabId,
+        providerId: settings.provider,
+        key: settings.keys[settings.provider],
+        model: jaaLlmActiveModel(settings),
+        system: systemPrompt,
+        messages: settings.messages,
+        tools: JAA_LLM_AGENT_TOOLS,
+        signal: controller.signal,
+        maxIterations: settings.maxAgentIterations || 10,
+        autoApplyReads: settings.autoApplyReads !== false,
+        onStep: showAgentStep,
+        onDelta: function (delta) {
+          dom.progress.hidden = true;
+          var current = target.textContent;
+          if (current === "Agent starting…" || current === "…") target.textContent = "";
+          var separated = jaaLlmSplitReasoning((target.jaaRawText || "") + delta);
+          target.jaaRawText = (target.jaaRawText || "") + delta;
+          renderAssistantParts(node, separated, false);
+          dom.transcript.scrollTop = dom.transcript.scrollHeight;
+        }
+      });
+
+      dom.progress.hidden = true;
+
+      // Display the agent's text response.
+      var replyText = loopResult.text || "";
+      var separated = jaaLlmSplitReasoning(replyText);
+      renderAssistantParts(node, separated, true);
+      if (separated.incomplete) throw new Error("The model stopped while reasoning before producing an answer. Increase the output limit or try a shorter request.");
+      replyText = separated.answer;
+
+      if (replyText) {
+        jaaRenderMarkdown(target, replyText);
+      }
+
+      // Add iteration info.
+      if (loopResult.iterations > 1) {
+        var iterNote = el("div", "llmAgentMeta", "Completed in " + loopResult.iterations + " reasoning steps.");
+        node.appendChild(iterNote);
+      }
+
+      settings.messages.push({ role: "assistant", content: replyText || "Agent task complete.", reasoning: separated.reasoning });
+      await setLlmSettings(settings);
+
+      // If there are write actions, show the review card.
+      if (loopResult.writeActions && loopResult.writeActions.length) {
+        var plan = await jaaAgentDescribeActions(loopResult.writeActions, pageTabId);
+        if (loopResult.pendingMessages) {
+          agentPendingMessages = loopResult.pendingMessages;
+        }
+        renderAgentActionPlan(node, plan, loopResult);
+      }
+
+    } catch (error) {
+      dom.progress.hidden = true;
+      var aborted = error && error.name === "AbortError";
+      node.classList.add("error");
+      target.textContent = aborted ? "Agent stopped." : String((error && error.message) || error);
+    } finally {
+      controller = null;
+      agentLoopActive = false;
+      setBusy(false);
+    }
+  }
+
+  function renderAgentActionPlan(afterNode, plan, loopResult) {
+    var card = el("div", "llmActionCard llmAgentCard");
+    pendingPlan = plan;
+    card.appendChild(el("strong", null, "Agent actions — review before applying"));
+    var list = el("ul");
+    plan.fields.forEach(function (change) {
+      var from = change.from ? '"' + change.from + '"' : "not saved";
+      list.appendChild(el("li", null, "Update " + change.label + ": " + from + " → \"" + change.to + "\""));
+    });
+    // Show click actions.
+    var clickActions = (plan.actions || []).filter(function (a) { return a.type === "click_element"; });
+    clickActions.forEach(function (action) {
+      list.appendChild(el("li", null, "Click: \"" + action.text + "\""));
+    });
+    if (plan.form && plan.actions.some(function (action) { return action.type === "fill_form"; })) {
+      var fillable = plan.form.fields.filter(function (field) { return field.fillable; });
+      var labels = fillable.slice(0, 6).map(function (field) { return field.label; }).join(", ");
+      list.appendChild(el("li", null, "Fill matching empty fields on \"" + plan.form.title + "\"" + (labels ? ": " + labels : "")));
+    }
+    card.appendChild(list);
+    card.appendChild(el("p", "llmActionNote", "The agent will observe results after applying and may propose follow-up corrections."));
+    var controls = el("div", "llmActionControls");
+    var apply = el("button", null, "Apply actions");
+    apply.type = "button";
+    var dismiss = el("button", "secondary", "Dismiss");
+    dismiss.type = "button";
+    var status = el("span", "llmActionStatus");
+    controls.appendChild(apply);
+    controls.appendChild(dismiss);
+    controls.appendChild(status);
+    card.appendChild(controls);
+    afterNode.insertAdjacentElement("afterend", card);
+
+    dismiss.addEventListener("click", function () {
+      if (pendingPlan === plan) pendingPlan = null;
+      agentPendingMessages = null;
+      card.remove();
+      if (!dom.transcript.querySelector(".llmActionCard")) dom.input.focus();
+    });
+
+    apply.addEventListener("click", async function () {
+      apply.disabled = true;
+      dismiss.disabled = true;
+      status.textContent = "Applying…";
+      try {
+        var result = await jaaAgentApplyActions(plan);
+        var resultText = actionResultText(result);
+        status.textContent = resultText;
+        if (pendingPlan === plan) pendingPlan = null;
+        apply.remove();
+        dismiss.textContent = "Close";
+        dismiss.disabled = false;
+
+        // If the agent loop wasn't done, resume it to observe results.
+        if (loopResult && !loopResult.done && agentPendingMessages) {
+          status.textContent += " Agent observing results…";
+          try {
+            var context = await buildLlmContext(settings.context, { pageTabId: pageTabId, providerId: settings.provider });
+            var systemPrompt = jaaLlmSystemPrompt(context);
+            if (typeof jaaAgentAgenticSystemInstructions === "function") {
+              systemPrompt += jaaAgentAgenticSystemInstructions();
+            }
+            var resumeResult = await jaaAgentResumeLoop({
+              tabId: pageTabId,
+              providerId: settings.provider,
+              key: settings.keys[settings.provider],
+              model: jaaLlmActiveModel(settings),
+              system: systemPrompt,
+              messages: agentPendingMessages,
+              tools: JAA_LLM_AGENT_TOOLS,
+              signal: new AbortController().signal,
+              maxIterations: 5
+            });
+            agentPendingMessages = null;
+            if (resumeResult.text) {
+              var followUp = bubble("assistant", "");
+              var followTarget = followUp.querySelector(".llmText");
+              jaaRenderMarkdown(followTarget, resumeResult.text);
+              dom.transcript.appendChild(followUp);
+              settings.messages.push({ role: "assistant", content: resumeResult.text });
+              await setLlmSettings(settings);
+              if (resumeResult.writeActions && resumeResult.writeActions.length) {
+                var followPlan = await jaaAgentDescribeActions(resumeResult.writeActions, pageTabId);
+                renderAgentActionPlan(followUp, followPlan, resumeResult);
+              }
+            }
+            status.textContent = resultText;
+          } catch (resumeError) {
+            status.textContent += " Follow-up observation failed: " + (resumeError.message || resumeError);
+          }
+        }
+      } catch (error) {
+        status.textContent = String((error && error.message) || error);
+        apply.disabled = false;
+        dismiss.disabled = false;
+      }
+    });
+    dom.transcript.scrollTop = dom.transcript.scrollHeight;
+  }
+
   // ---------- wiring ----------
 
   function pickCustomModel() {
     var provider = jaaLlmProvider(settings.provider);
-    var isLocal = provider.kind === "local";
-    var answer = prompt(
-      isLocal
-        ? "Hugging Face model id (must be an ONNX build, e.g. onnx-community/SmolLM2-135M-Instruct-ONNX)"
-        : "Model id for " + provider.label,
-      jaaLlmActiveModel(settings)
-    );
+    var answer = prompt("Model id for " + provider.label, jaaLlmActiveModel(settings));
     if (!answer || !answer.trim()) {
       renderModels();
       return;
@@ -515,6 +789,12 @@ its <script> tags, and the Assistant tab button — nothing else references it.
   function applyModel(id) {
     var provider = jaaLlmProvider(settings.provider);
     if (provider.kind === "local") {
+      if (!jaaLlmIsListedLocalModel(id)) {
+        renderModels();
+        return;
+      }
+      jaaLlmRememberLocalModel(settings, settings.localModel);
+      jaaLlmRememberLocalModel(settings, id);
       settings.localModel = id;
     } else {
       settings.apiModels[provider.id] = id;
@@ -539,6 +819,8 @@ its <script> tags, and the Assistant tab button — nothing else references it.
       ["undoClearBtn", "llmUndoClearBtn"], ["chatStatus", "llmChatStatus"],
       ["parameters", "llmParameters"], ["contextWindow", "llmContextWindow"],
       ["maxNewTokens", "llmMaxNewTokens"], ["doSample", "llmDoSample"],
+      ["maxContext", "llmMaxContext"], ["maxOutput", "llmMaxOutput"],
+      ["thinkingToggle", "llmThinkingToggle"], ["enableThinking", "llmEnableThinking"],
       ["temperature", "llmTemperature"], ["topP", "llmTopP"], ["topK", "llmTopK"],
       ["repetitionPenalty", "llmRepetitionPenalty"], ["resetParameters", "llmResetParameters"],
       ["parameterStatus", "llmParameterStatus"]
@@ -548,7 +830,7 @@ its <script> tags, and the Assistant tab button — nothing else references it.
 
     settings = await getLlmSettings();
     dom.parameterInputs = [
-      dom.contextWindow, dom.maxNewTokens, dom.doSample, dom.temperature,
+      dom.contextWindow, dom.maxNewTokens, dom.doSample, dom.enableThinking, dom.temperature,
       dom.topP, dom.topK, dom.repetitionPenalty
     ];
     var cleanedReasoning = false;
@@ -556,8 +838,9 @@ its <script> tags, and the Assistant tab button — nothing else references it.
       if (message.role !== "assistant") return;
       var separated = jaaLlmSplitReasoning(message.content);
       if (!separated.reasoning && !separated.incomplete) return;
+      if (separated.reasoning) message.reasoning = separated.reasoning;
       message.content = separated.incomplete
-        ? "The model stopped while reasoning and did not produce a final answer. Try again with a shorter request or add `/no_think`."
+        ? "The model stopped while reasoning and did not produce a final answer. Increase the output limit or try a shorter request."
         : separated.answer;
       cleanedReasoning = true;
     });
@@ -611,6 +894,24 @@ its <script> tags, and the Assistant tab button — nothing else references it.
           dom.parameterStatus.textContent = "Could not save parameters: " + error.message;
         });
       });
+    });
+
+    dom.maxContext.addEventListener("click", function () {
+      var bounds = jaaLocalParameterBounds(settings.localModel);
+      if (!bounds.contextMax) return;
+      dom.contextWindow.value = bounds.contextMax;
+      saveParameters().catch(function (error) { dom.parameterStatus.textContent = "Could not save context: " + error.message; });
+    });
+
+    dom.maxOutput.addEventListener("click", function () {
+      var bounds = jaaLocalParameterBounds(settings.localModel);
+      var contextWindow = Number(dom.contextWindow.value);
+      if (!Number.isSafeInteger(contextWindow) || contextWindow <= bounds.outputMin) {
+        dom.parameterStatus.textContent = "Set a context window larger than " + bounds.outputMin + " tokens first.";
+        return;
+      }
+      dom.maxNewTokens.value = Math.min(contextWindow - 1, bounds.outputMax);
+      saveParameters().catch(function (error) { dom.parameterStatus.textContent = "Could not save output limit: " + error.message; });
     });
 
     dom.resetParameters.addEventListener("click", async function () {
@@ -670,7 +971,19 @@ its <script> tags, and the Assistant tab button — nothing else references it.
       var text = dom.input.value.trim();
       if (!text) return;
       dom.input.value = "";
-      currentSend = send(text);
+      // Route to agentic mode if the message starts with [agent] or the
+      // effective agent mode is 'always' and the message mentions forms/filling.
+      var isAgentRequest = /^\[agent\]/i.test(text);
+      var effectiveMode = typeof jaaLlmEffectiveAgentMode === "function" ? jaaLlmEffectiveAgentMode(settings) : "never";
+      if (!isAgentRequest && effectiveMode === "always") {
+        isAgentRequest = /\b(?:fill|autofill|apply|complete)\b[\s\S]*\b(?:form|fields?|page|application)\b/i.test(text);
+      }
+      if (isAgentRequest) {
+        var cleanText = text.replace(/^\[agent\]\s*/i, "");
+        currentSend = sendAgentic(cleanText);
+      } else {
+        currentSend = send(text);
+      }
     });
 
     // Enter sends, Shift+Enter makes a new line.
