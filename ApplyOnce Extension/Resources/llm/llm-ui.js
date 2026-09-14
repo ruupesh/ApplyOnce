@@ -34,6 +34,7 @@ its <script> tags, and the Assistant tab button — nothing else references it.
   var progressLoaded = 0;
   var progressTotal = 0;
   var progressPercent = 0;
+  var previewCapture = null;
 
   var dom = {};
 
@@ -158,29 +159,71 @@ its <script> tags, and the Assistant tab button — nothing else references it.
     renderParameters("Saved for " + modelId + ".");
   }
 
+  function pageImageAvailable() {
+    return settings.provider !== "local" || jaaLocalIsGemma4(settings.localModel);
+  }
+
+  function selectVisionModelForPageImage() {
+    if (!settings.context.pageImage) return;
+    var current = jaaLlmActiveModel(settings);
+    if (settings.provider === "groq" && ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"].indexOf(current) !== -1) {
+      settings.apiModels.groq = "qwen/qwen3.6-27b";
+    }
+    if (settings.provider === "deepseek" && ["deepseek-chat", "deepseek-reasoner"].indexOf(current) !== -1) {
+      settings.apiModels.deepseek = "deepseek-v4-flash-vision-exp";
+    }
+  }
+
+  function pageImagesForSend(signal) {
+    if (previewCapture && previewCapture.tabId === pageTabId) {
+      var images = previewCapture.images;
+      previewCapture = null;
+      dom.pagePreview.textContent = "Preview page image";
+      return Promise.resolve(images);
+    }
+    return jaaCapturePageImages(pageTabId, signal, function (done, total) {
+      dom.progress.hidden = false;
+      dom.progressText.textContent = "Capturing page image " + done + " of " + total + "…";
+    });
+  }
+
   function renderChips() {
     dom.chips.innerHTML = "";
-    JAA_LLM_TOOLS.forEach(function (tool) {
+    JAA_LLM_TOOLS.concat([{
+      id: "pageImage",
+      label: "Page image",
+      hint: "Attach ordered screenshots of the full webpage. Hosted providers receive the images; the page may contain private information."
+    }]).forEach(function (tool) {
       var chip = el("button", "llmChip", tool.label);
       chip.type = "button";
-      chip.disabled = busy;
+      var available = tool.id !== "pageImage" || pageImageAvailable();
+      chip.disabled = busy || !available;
       chip.title = tool.hint;
-      var on = !!settings.context[tool.id];
+      var on = available && !!settings.context[tool.id];
       chip.classList.toggle("on", on);
       chip.setAttribute("aria-pressed", on ? "true" : "false");
       chip.addEventListener("click", function () {
         settings.context[tool.id] = !settings.context[tool.id];
+        if (tool.id === "pageImage") {
+          previewCapture = null;
+          selectVisionModelForPageImage();
+          renderModels();
+        }
         setLlmSettings(settings);
         renderChips();
-        if (tool.id === "page") renderPagePicker();
+        if (tool.id === "page" || tool.id === "pageImage") renderPagePicker();
       });
       dom.chips.appendChild(chip);
     });
   }
 
   async function renderPagePicker() {
-    dom.pageRow.hidden = !settings.context.page;
-    if (!settings.context.page) return;
+    var needsPage = settings.context.page || (settings.context.pageImage && pageImageAvailable());
+    dom.pageRow.hidden = !needsPage;
+    dom.pagePreview.hidden = !settings.context.pageImage || !pageImageAvailable();
+    dom.pagePreview.disabled = busy || pageTabId === null;
+    dom.pagePreview.textContent = previewCapture ? "Refresh preview" : "Preview page image";
+    if (!needsPage) return;
     dom.pageSelect.innerHTML = "";
     try {
       var tabs = await jaaBrowser.tabs.query({ lastFocusedWindow: true });
@@ -188,6 +231,7 @@ its <script> tags, and the Assistant tab button — nothing else references it.
         return Number(!!b.active) - Number(!!a.active) || (b.lastAccessed || 0) - (a.lastAccessed || 0);
       });
       if (!tabs.some(function (tab) { return tab.id === pageTabId; })) pageTabId = tabs.length ? tabs[0].id : null;
+      dom.pagePreview.disabled = busy || pageTabId === null;
       tabs.forEach(function (tab) {
         var option = el("option", null, (tab.title || new URL(tab.url).hostname) + " · " + new URL(tab.url).hostname);
         option.value = tab.id;
@@ -197,6 +241,45 @@ its <script> tags, and the Assistant tab button — nothing else references it.
       if (!tabs.length) dom.pageSelect.appendChild(el("option", null, "No readable web tabs open"));
     } catch (error) {
       dom.pageSelect.appendChild(el("option", null, "Could not list web tabs"));
+    }
+  }
+
+  async function previewPageImage() {
+    if (pageTabId === null) return;
+    setBusy(true);
+    controller = new AbortController();
+    dom.chatStatus.hidden = true;
+    try {
+      var tab = await jaaBrowser.tabs.get(pageTabId);
+      var images = await jaaCapturePageImages(pageTabId, controller.signal, function (done, total) {
+        dom.progress.hidden = false;
+        dom.progressText.textContent = "Capturing page image " + done + " of " + total + "…";
+      });
+      previewCapture = { tabId: pageTabId, images: images };
+      dom.previewInfo.textContent = images.length + " screenshot" + (images.length === 1 ? "" : "s") + " from " + tab.url + ". These exact images will be sent with your next message. Click an image to view it at capture size.";
+      dom.previewTiles.innerHTML = "";
+      images.forEach(function (dataUrl, index) {
+        var figure = el("figure");
+        var caption = el("figcaption", null, "Page section " + (index + 1) + " of " + images.length);
+        var image = el("img");
+        image.src = dataUrl;
+        image.alt = "Captured page section " + (index + 1) + " of " + images.length;
+        image.addEventListener("click", function () { image.classList.toggle("actual"); });
+        figure.appendChild(caption);
+        figure.appendChild(image);
+        dom.previewTiles.appendChild(figure);
+      });
+      dom.pagePreview.textContent = "Refresh preview";
+      dom.previewDialog.showModal();
+    } catch (error) {
+      dom.chatStatus.textContent = error && error.name === "AbortError"
+        ? "Page image preview stopped."
+        : "Could not preview page image: " + String((error && error.message) || error);
+      dom.chatStatus.hidden = false;
+    } finally {
+      controller = null;
+      dom.progress.hidden = true;
+      setBusy(false);
     }
   }
 
@@ -373,6 +456,7 @@ its <script> tags, and the Assistant tab button — nothing else references it.
     dom.undoClearBtn.disabled = value;
     dom.removeModel.disabled = value;
     dom.pageSelect.disabled = value;
+    dom.pagePreview.disabled = value || pageTabId === null || !settings.context.pageImage || !pageImageAvailable();
     renderParameters();
     Array.prototype.forEach.call(dom.transcript.querySelectorAll(".llmActionCard button"), function (button) { button.disabled = value; });
     renderChips();
@@ -380,6 +464,10 @@ its <script> tags, and the Assistant tab button — nothing else references it.
 
   function showProgress(report) {
     dom.progress.hidden = false;
+    if (report.status === "visual") {
+      dom.progressText.textContent = "Analyzing page section " + report.done + " of " + report.total + "…";
+      return;
+    }
     if (report.status === "loading") {
       progressLoaded = 0;
       progressTotal = 0;
@@ -513,8 +601,10 @@ its <script> tags, and the Assistant tab button — nothing else references it.
         await setLlmSettings(settings);
         return;
       }
-      if (settings.context.page && pageTabId === null) throw new Error("Choose a readable web tab to attach.");
+      var attachImage = settings.context.pageImage && pageImageAvailable();
+      if ((settings.context.page || attachImage) && pageTabId === null) throw new Error("Choose a readable web tab to attach.");
       var context = await buildLlmContext(settings.context, { pageTabId: pageTabId });
+      var pageImages = attachImage ? await pageImagesForSend(controller.signal) : [];
       controller.signal.throwIfAborted();
       var reply = await sendToLlm({
         providerId: settings.provider,
@@ -527,6 +617,7 @@ its <script> tags, and the Assistant tab button — nothing else references it.
         ),
         system: jaaLlmSystemPrompt(context),
         messages: settings.messages,
+        pageImages: pageImages,
         signal: controller.signal,
         onProgress: showProgress,
         onDelta: function (delta) {
@@ -601,6 +692,8 @@ its <script> tags, and the Assistant tab button — nothing else references it.
       if (pageTabId === null) throw new Error("Open a webpage containing a form, then try again.");
 
       var context = await buildLlmContext(settings.context, { pageTabId: pageTabId, providerId: settings.provider });
+      var attachImage = settings.context.pageImage && pageImageAvailable();
+      var pageImages = attachImage ? await pageImagesForSend(controller.signal) : [];
       controller.signal.throwIfAborted();
 
       var systemPrompt = jaaLlmSystemPrompt(context);
@@ -613,6 +706,8 @@ its <script> tags, and the Assistant tab button — nothing else references it.
         providerId: settings.provider,
         key: settings.keys[settings.provider],
         model: jaaLlmActiveModel(settings),
+        parameters: jaaLocalParameterSettings(settings.localModel, settings.localParameters && settings.localParameters[settings.localModel]),
+        pageImages: pageImages,
         system: systemPrompt,
         messages: settings.messages,
         tools: JAA_LLM_AGENT_TOOLS,
@@ -741,6 +836,7 @@ its <script> tags, and the Assistant tab button — nothing else references it.
               providerId: settings.provider,
               key: settings.keys[settings.provider],
               model: jaaLlmActiveModel(settings),
+              parameters: jaaLocalParameterSettings(settings.localModel, settings.localParameters && settings.localParameters[settings.localModel]),
               system: systemPrompt,
               messages: agentPendingMessages,
               tools: JAA_LLM_AGENT_TOOLS,
@@ -801,6 +897,8 @@ its <script> tags, and the Assistant tab button — nothing else references it.
     }
     setLlmSettings(settings);
     renderModels();
+    renderChips();
+    renderPagePicker();
   }
 
   async function init() {
@@ -816,6 +914,9 @@ its <script> tags, and the Assistant tab button — nothing else references it.
       ["progressFill", "llmProgressFill"], ["progressText", "llmProgressText"],
       ["modelInfo", "llmModelInfo"], ["removeModel", "llmRemoveModel"],
       ["pageRow", "llmPageRow"], ["pageSelect", "llmPageSelect"],
+      ["pagePreview", "llmPreviewPage"], ["previewDialog", "llmImagePreview"],
+      ["previewClose", "llmImagePreviewClose"], ["previewInfo", "llmImagePreviewInfo"],
+      ["previewTiles", "llmImagePreviewTiles"],
       ["undoClearBtn", "llmUndoClearBtn"], ["chatStatus", "llmChatStatus"],
       ["parameters", "llmParameters"], ["contextWindow", "llmContextWindow"],
       ["maxNewTokens", "llmMaxNewTokens"], ["doSample", "llmDoSample"],
@@ -858,7 +959,13 @@ its <script> tags, and the Assistant tab button — nothing else references it.
     renderKeysPanel();
     renderTranscript();
     renderPagePicker();
-    dom.pageSelect.addEventListener("change", function () { pageTabId = Number(dom.pageSelect.value); });
+    dom.pageSelect.addEventListener("change", function () {
+      pageTabId = Number(dom.pageSelect.value);
+      previewCapture = null;
+      dom.pagePreview.textContent = "Preview page image";
+    });
+    dom.pagePreview.addEventListener("click", previewPageImage);
+    dom.previewClose.addEventListener("click", function () { dom.previewDialog.close(); });
     dom.removeModel.addEventListener("click", async function () {
       if (!confirm("Remove the selected model's downloaded files? You can download it again on your next message.")) return;
       setBusy(true);
@@ -872,8 +979,12 @@ its <script> tags, and the Assistant tab button — nothing else references it.
 
     dom.provider.addEventListener("change", function () {
       settings.provider = dom.provider.value;
+      previewCapture = null;
+      selectVisionModelForPageImage();
       setLlmSettings(settings);
       renderModels();
+      renderChips();
+      renderPagePicker();
       renderPrivacy();
       var provider = jaaLlmProvider(settings.provider);
       if (provider.needsKey && !settings.keys[provider.id]) dom.keysPanel.hidden = false;

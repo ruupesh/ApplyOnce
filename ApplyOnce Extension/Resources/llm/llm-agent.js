@@ -329,6 +329,8 @@ async function jaaAgentLoop(options) {
       providerId: options.providerId,
       key: options.key,
       model: options.model,
+      parameters: options.parameters,
+      pageImages: options.providerId === "local" && iteration !== 1 ? [] : options.pageImages,
       system: options.system,
       messages: agentMessages,
       tools: options.tools,

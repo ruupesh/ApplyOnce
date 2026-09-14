@@ -67,6 +67,13 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
         sendResponse(getApplicationContext());
       } else if (msg.type === "JAA_GET_PAGE_TEXT") {
         sendResponse(getReadablePageText());
+      } else if (msg.type === "JAA_PAGE_IMAGE_STATE") {
+        var scrolling = document.scrollingElement || document.documentElement;
+        if (typeof msg.y === "number") window.scrollTo({ top: msg.y, behavior: "instant" });
+        setTimeout(function () {
+          sendResponse({ y: window.scrollY, height: scrolling.scrollHeight, viewport: window.innerHeight });
+        }, typeof msg.y === "number" ? 180 : 0);
+        return true;
       } else if (msg.type === "JAA_AGENT_INSPECT_FORM") {
         sendResponse(getAgentFormSnapshot());
       } else if (msg.type === "JAA_AGENT_FILL_FORM") {
@@ -2343,7 +2350,7 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
   // review, and targeted edits, so all four agree about the page's state.
   function getPageFieldInventory() {
     var items = [];
-    function add(labelAliases, type, current, required, key, ref) {
+    function add(labelAliases, type, current, required, key, ref, formatHint) {
       var label = labelAliases[0];
       if (!label || SENSITIVE_LABEL_RE.test(label)) return;
       var matchedKey = key || findMatchingKeyForAliases(state, labelAliases);
@@ -2357,6 +2364,7 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
         current: value.slice(0, 300),
         saved: saved == null ? "" : String(saved).slice(0, 300),
         required: !!required,
+        formatHint: formatHint || "",
         empty: !value,
         fillable: !!saved && !value
       });
@@ -2376,7 +2384,12 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
           : findAgentFieldKey(state, el, label, aliases);
       }
       var current = el.type === "file" ? (el.files && el.files[0] ? el.files[0].name : "") : getElementValue(el);
-      add(aliases, elementType(el), current, isRequiredControl(el, label), key, getAgentFieldRef(el, label));
+      var describedBy = (el.getAttribute("aria-describedby") || "").split(/\s+/).map(function (id) {
+        var description = id && document.getElementById(id);
+        return description ? cleanText(description.textContent) : "";
+      }).filter(Boolean).join(" ");
+      var formatHint = [el.getAttribute("placeholder"), el.getAttribute("pattern"), describedBy].filter(Boolean).join("; ");
+      add(aliases, elementType(el), current, isRequiredControl(el, label), key, getAgentFieldRef(el, label), formatHint.slice(0, 160));
     });
     getRadioGroups().forEach(function (radios) {
       // Workday radio groups are also represented by their formField

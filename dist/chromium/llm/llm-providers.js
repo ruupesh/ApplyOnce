@@ -161,11 +161,37 @@ async function jaaLlmStreamWithTools(request, extractDelta, onDelta) {
 
 // ---------- adapters ----------
 
+function jaaLlmImageData(dataUrl) {
+  var match = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl || "");
+  if (!match) throw new Error("The page screenshot is not a supported image. Preview and capture it again.");
+  return { mimeType: match[1], data: match[2] };
+}
+
+function jaaLlmImageMessages(messages, images, providerKind) {
+  if (!images || !images.length) return messages;
+  var result = messages.map(function (message) { return Object.assign({}, message); });
+  var last = result.map(function (message) { return message.role; }).lastIndexOf("user");
+  if (last < 0) throw new Error("A user message is required with a page image.");
+  var blocks = [];
+  images.forEach(function (dataUrl, index) {
+    blocks.push({ type: "text", text: "Page screenshot " + (index + 1) + " of " + images.length + ":" });
+    if (providerKind === "openai") {
+      blocks.push({ type: "image_url", image_url: { url: dataUrl } });
+    } else {
+      var image = jaaLlmImageData(dataUrl);
+      blocks.push({ type: "image", source: { type: "base64", media_type: image.mimeType, data: image.data } });
+    }
+  });
+  blocks.push({ type: "text", text: result[last].content });
+  result[last].content = blocks;
+  return result;
+}
+
 function jaaLlmSendOpenAI(options) {
   var body = {
     model: options.model,
     stream: true,
-    messages: [{ role: "system", content: options.system }].concat(options.messages)
+    messages: [{ role: "system", content: options.system }].concat(jaaLlmImageMessages(options.messages, options.pageImages, "openai"))
   };
   // Native function calling when tools are provided.
   if (options.tools && options.tools.length) {
@@ -209,7 +235,7 @@ function jaaLlmSendAnthropic(options) {
     max_tokens: 4096,
     stream: true,
     system: options.system,
-    messages: options.messages
+    messages: jaaLlmImageMessages(options.messages, options.pageImages, "anthropic")
   };
   if (options.tools && options.tools.length) {
     body.tools = options.tools.map(function (tool) {
@@ -257,12 +283,21 @@ function jaaLlmSendAnthropic(options) {
 }
 
 function jaaLlmSendGemini(options) {
+  var imageMessageIndex = options.messages.map(function (message) { return message.role; }).lastIndexOf("user");
   var body = {
     systemInstruction: { parts: [{ text: options.system }] },
-    contents: options.messages.map(function (message) {
+    contents: options.messages.map(function (message, index) {
+      var images = index === imageMessageIndex ? options.pageImages : null;
+      var parts = [];
+      (images || []).forEach(function (dataUrl, imageIndex) {
+        var image = jaaLlmImageData(dataUrl);
+        parts.push({ text: "Page screenshot " + (imageIndex + 1) + " of " + images.length + ":" });
+        parts.push({ inlineData: { mimeType: image.mimeType, data: image.data } });
+      });
+      parts.push({ text: message.content });
       return {
         role: message.role === "assistant" ? "model" : "user",
-        parts: [{ text: message.content }]
+        parts: parts
       };
     })
   };
@@ -320,6 +355,63 @@ function jaaLlmWireMessages(messages) {
   });
 }
 
+function jaaLlmImageBatchEnd(images, start, providerId) {
+  // Groq's current vision models accept at most three images. Keep other
+  // requests below the inline-body budgets used by hosted APIs.
+  var countLimit = providerId === "groq" ? 3 : 8;
+  var sizeLimit = 12 * 1024 * 1024;
+  var end = start;
+  var size = 0;
+  while (end < images.length && end - start < countLimit) {
+    if (end > start && size + images[end].length > sizeLimit) break;
+    size += images[end].length;
+    end++;
+  }
+  return end;
+}
+
+async function jaaLlmSendHosted(provider, options) {
+  var adapter = JAA_LLM_ADAPTERS[provider.kind];
+  var messages = jaaLlmWireMessages(options.messages);
+  var images = options.pageImages || [];
+  var base = {
+    endpoint: provider.endpoint, key: options.key, model: options.model,
+    system: options.system, messages: messages, tools: options.tools,
+    onDelta: options.onDelta, signal: options.signal
+  };
+  if (!images.length) return adapter(base);
+
+  var userIndex = messages.map(function (message) { return message.role; }).lastIndexOf("user");
+  if (userIndex < 0) throw new Error("A user message is required with a page image.");
+  var question = messages[userIndex].content;
+  var notes = "";
+  var start = 0;
+  var section = 0;
+  var total = 0;
+  for (var cursor = 0; cursor < images.length; cursor = jaaLlmImageBatchEnd(images, cursor, provider.id)) total++;
+  while (jaaLlmImageBatchEnd(images, start, provider.id) < images.length) {
+    if (options.signal) options.signal.throwIfAborted();
+    var end = jaaLlmImageBatchEnd(images, start, provider.id);
+    section++;
+    if (options.onProgress) options.onProgress({ status: "visual", done: section, total: total });
+    var summary = await adapter(Object.assign({}, base, {
+      system: "Read ordered webpage screenshots. Maintain concise notes of exact visible field labels, formats, validation hints, dates, and page facts relevant to the user's request. Preserve relevant earlier notes. Do not invent unseen details.",
+      messages: [{ role: "user", content: "User request: " + question + "\nEarlier page notes: " + (notes || "none") + "\nThese screenshots are page sections " + (start + 1) + " through " + end + " of " + images.length + ". Update the notes using them." }],
+      pageImages: images.slice(start, end), tools: undefined, onDelta: undefined
+    }));
+    notes = String(summary.text || "").trim();
+    if (!notes) throw new Error("The provider could not read one section of the page.");
+    start = end;
+  }
+  if (options.signal) options.signal.throwIfAborted();
+  if (options.onProgress) options.onProgress({ status: "visual", done: total, total: total });
+  var finalMessages = messages.map(function (message) { return Object.assign({}, message); });
+  if (notes) finalMessages[userIndex].content +=
+    "\n\nNotes from earlier sections of the attached webpage (top to bottom):\n" + notes +
+    "\nUse these notes together with the remaining screenshots to answer my request.";
+  return adapter(Object.assign({}, base, { messages: finalMessages, pageImages: images.slice(start) }));
+}
+
 // Single entry point the chat UI calls, whichever provider is selected.
 // Returns a string (backward compatible, no tool calls).
 function sendToLlm(options) {
@@ -331,15 +423,7 @@ function sendToLlm(options) {
   if (!options.key) return Promise.reject(new Error("Add your " + provider.label + " API key first."));
 
   // When called without tools, return text-only for backward compatibility.
-  return adapter({
-    endpoint: provider.endpoint,
-    key: options.key,
-    model: options.model,
-    system: options.system,
-    messages: jaaLlmWireMessages(options.messages),
-    onDelta: options.onDelta,
-    signal: options.signal
-  }).then(function (result) {
+  return jaaLlmSendHosted(provider, options).then(function (result) {
     // Adapters now return { text, toolCalls }; extract text for compat.
     return typeof result === "string" ? result : result.text;
   });
@@ -361,16 +445,7 @@ function sendToLlmWithTools(options) {
   if (!adapter) return Promise.reject(new Error("Unsupported provider: " + provider.id));
   if (!options.key) return Promise.reject(new Error("Add your " + provider.label + " API key first."));
 
-  return adapter({
-    endpoint: provider.endpoint,
-    key: options.key,
-    model: options.model,
-    system: options.system,
-    messages: jaaLlmWireMessages(options.messages),
-    tools: options.tools,
-    onDelta: options.onDelta,
-    signal: options.signal
-  });
+  return jaaLlmSendHosted(provider, options);
 }
 
 if (typeof window !== "undefined") {

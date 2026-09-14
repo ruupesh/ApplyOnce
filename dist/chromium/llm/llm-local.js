@@ -297,6 +297,7 @@ async function listCachedLocalModels() {
 async function jaaGenerateLocalLlm(options) {
   if (options.signal) options.signal.throwIfAborted();
   var parameterSettings = jaaLocalParameterSettings(options.model, options.parameters);
+  if (options.pageImages && options.pageImages.length) return jaaGenerateLocalVisualLlm(options, parameterSettings);
   var generator = await jaaGetLocalPipeline(options.model, options.dtype || "q4", options.onProgress);
   if (options.onProgress) options.onProgress({ status: "ready" });
   if (options.signal) options.signal.throwIfAborted();
@@ -348,6 +349,113 @@ async function jaaGenerateLocalLlm(options) {
   }
 }
 
+// A text-generation pipeline ignores image content. Use Gemma 4's published
+// multimodal processor/model path when a page image is attached.
+async function jaaGenerateLocalVisualLlm(options, settings) {
+  if (!jaaLocalIsGemma4(options.model)) throw new Error("Page images require an on-device Gemma 4 model.");
+  if (await jaaLocalDevice() !== "webgpu") throw new Error("Gemma 4 page images require WebGPU in this browser.");
+  var key = options.model + "|visual|q4f16|webgpu";
+  var visual = jaaLocalPipeline && jaaLocalPipeline.key === key ? jaaLocalPipeline.visual : null;
+  var module = await jaaLoadLocalModule();
+  if (!visual) {
+    await unloadLocalLlm();
+    if (options.onProgress) options.onProgress({ status: "loading" });
+    var model = await module.Gemma4ForConditionalGeneration.from_pretrained(options.model, {
+      dtype: "q4f16", device: "webgpu", revision: jaaLocalRevision(options.model),
+      progress_callback: function (report) {
+        if (options.onProgress && report.status === "progress_total" && report.total) {
+          options.onProgress({ status: "progress", loaded: report.loaded, total: report.total,
+            percent: Math.min(100, Math.round(report.loaded / report.total * 100)) });
+        }
+      }
+    });
+    var processor;
+    try { processor = await module.AutoProcessor.from_pretrained(options.model); }
+    catch (error) { await model.dispose(); throw error; }
+    visual = { model: model, processor: processor };
+    jaaLocalPipeline = { key: key, generator: { dispose: function () { return model.dispose(); } }, visual: visual };
+  }
+  if (options.onProgress) options.onProgress({ status: "ready" });
+  if (options.signal) options.signal.throwIfAborted();
+  var recent = typeof jaaLlmLocalMessages === "function" ? jaaLlmLocalMessages(options.messages) : options.messages;
+  var question = recent.length && recent[recent.length - 1].role === "user" ? recent[recent.length - 1].content : "";
+  if (!question) throw new Error("A user message is required with a page image.");
+
+  async function runVisualTurn(messages, dataUrls, maxTokens, thinking, stream) {
+    if (options.signal) options.signal.throwIfAborted();
+    var images = await Promise.all(dataUrls.map(async function (dataUrl) {
+      return module.RawImage.fromBlob(await (await fetch(dataUrl)).blob());
+    }));
+    var conversation = messages.map(function (message) {
+      return { role: message.role, content: message.content };
+    });
+    var last = conversation[conversation.length - 1];
+    if (!last || last.role !== "user") throw new Error("A user message is required with a page image.");
+    last.content = images.map(function () { return { type: "image" }; }).concat([{ type: "text", text: last.content }]);
+    var generationOptions = jaaLocalGenerationOptions(options.model, settings);
+    generationOptions.max_new_tokens = maxTokens;
+    if (!stream) generationOptions.do_sample = false;
+    var inputs;
+    while (true) {
+      var prompt = visual.processor.apply_chat_template(conversation, {
+        enable_thinking: thinking, add_generation_prompt: true
+      });
+      inputs = await visual.processor(prompt, images.length ? images : undefined, undefined, { add_special_tokens: false });
+      var remaining = settings.contextWindow - inputs.input_ids.dims.at(-1);
+      if (remaining > 0) {
+        generationOptions.max_new_tokens = Math.min(generationOptions.max_new_tokens, remaining);
+        break;
+      }
+      if (conversation.length <= 2) throw new Error("The page images and message exceed the selected context window. Increase it or turn off the page image.");
+      conversation.splice(1, 1);
+      while (conversation.length > 2 && conversation[1].role !== "user") conversation.splice(1, 1);
+    }
+    var stopping = new module.InterruptableStoppingCriteria();
+    var interrupt = function () { stopping.interrupt(); };
+    if (options.signal) options.signal.addEventListener("abort", interrupt, { once: true });
+    var text = "";
+    try {
+      await visual.model.generate(Object.assign({}, inputs, generationOptions, {
+        streamer: new module.TextStreamer(visual.processor.tokenizer, {
+          skip_prompt: true, skip_special_tokens: !stream,
+          callback_function: function (delta) {
+            text += delta;
+            if (stream && options.onDelta) options.onDelta(delta);
+          }
+        }),
+        stopping_criteria: [stopping]
+      }));
+      if (options.signal) options.signal.throwIfAborted();
+      return text.trim();
+    } finally {
+      if (options.signal) options.signal.removeEventListener("abort", interrupt);
+    }
+  }
+
+  // Keep only one image batch decoded at a time. Earlier batches are distilled
+  // into rolling notes so a long page does not require one enormous model run.
+  var batchSize = 8;
+  var total = Math.ceil(options.pageImages.length / batchSize);
+  var notes = "";
+  var start = 0;
+  for (; start + batchSize < options.pageImages.length; start += batchSize) {
+    if (options.onProgress) options.onProgress({ status: "visual", done: Math.floor(start / batchSize) + 1, total: total });
+    notes = await runVisualTurn([
+      { role: "system", content: "Read ordered webpage screenshots. Maintain concise notes of exact visible field labels, formats, validation hints, dates, and page facts relevant to the user's request. Preserve relevant earlier notes. Do not invent unseen details." },
+      { role: "user", content: "User request: " + question + "\nEarlier page notes: " + (notes || "none") + "\nUpdate the notes using these next screenshots." }
+    ], options.pageImages.slice(start, start + batchSize), 384, false, false);
+    if (!notes) throw new Error("Gemma 4 could not read one section of the page. Try a shorter page or larger context window.");
+  }
+  if (options.onProgress) options.onProgress({ status: "visual", done: total, total: total });
+  var finalMessages = [{ role: "system", content: options.system }].concat(recent.map(function (message) {
+    return { role: message.role, content: message.content };
+  }));
+  if (notes) finalMessages[finalMessages.length - 1].content +=
+    "\n\nNotes from earlier sections of the attached webpage (top to bottom):\n" + notes +
+    "\nUse these notes together with the remaining screenshots to answer my request.";
+  return runVisualTurn(finalMessages, options.pageImages.slice(start), settings.maxNewTokens, settings.enableThinking, true);
+}
+
 // Inference belongs in a worker so downloads and CPU generation never block
 // the editor. Terminating it also cancels downloads and frees model memory.
 function sendToLocalLlm(options) {
@@ -396,7 +504,8 @@ function sendToLocalLlm(options) {
       dtype: options.dtype,
       parameters: options.parameters,
       system: options.system,
-      messages: options.messages
+      messages: options.messages,
+      pageImages: options.pageImages
     });
   });
 }

@@ -30,7 +30,7 @@ var JAA_LLM_PROVIDERS = [
     needsKey: true,
     endpoint: "https://api.groq.com/openai/v1/chat/completions",
     keysUrl: "https://console.groq.com/keys",
-    models: ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+    models: ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen/qwen3.6-27b", "qwen/qwen3.8-27b"]
   },
   {
     id: "deepseek",
@@ -39,7 +39,7 @@ var JAA_LLM_PROVIDERS = [
     needsKey: true,
     endpoint: "https://api.deepseek.com/chat/completions",
     keysUrl: "https://platform.deepseek.com/api_keys",
-    models: ["deepseek-chat", "deepseek-reasoner"]
+    models: ["deepseek-chat", "deepseek-reasoner", "deepseek-v4-flash-vision-exp"]
   },
   {
     id: "anthropic",
@@ -82,7 +82,7 @@ function jaaLlmDefaults() {
     localModelHistory: [],
     localDtype: "q4",
     localParameters: {},
-    context: { profile: true, resume: false, applications: false, page: false },
+    context: { profile: true, resume: false, applications: false, page: false, pageImage: false },
     messages: [],
     agentMode: "auto",
     maxAgentIterations: 10,

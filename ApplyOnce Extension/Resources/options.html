@@ -261,10 +261,19 @@
         <span class="llmAttachLabel">Attach</span>
         <div class="llmChips" id="llmChips"></div>
       </div>
-      <label class="llmPageRow" id="llmPageRow" hidden>
-        Page to inspect
+      <div class="llmPageRow" id="llmPageRow" hidden>
+        <label for="llmPageSelect">Page to inspect</label>
         <select id="llmPageSelect" aria-label="Page to attach"></select>
-      </label>
+        <button type="button" id="llmPreviewPage" class="secondary" hidden>Preview page image</button>
+      </div>
+      <dialog class="llmImagePreview" id="llmImagePreview" aria-label="Page images to send">
+        <div class="llmImagePreviewHeader">
+          <strong>Page images to send</strong>
+          <button type="button" id="llmImagePreviewClose" class="secondary">Close</button>
+        </div>
+        <p id="llmImagePreviewInfo"></p>
+        <div id="llmImagePreviewTiles" class="llmImagePreviewTiles"></div>
+      </dialog>
 
       <div class="llmChatHeader">
         <h2>Conversation</h2>

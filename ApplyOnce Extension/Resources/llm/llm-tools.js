@@ -96,6 +96,7 @@ async function jaaLlmPageContext(options) {
       var fieldLines = form.fields.map(function (field) {
         var status = field.current ? "filled: " + jaaLlmTruncate(field.current, 160) : "empty";
         if (!field.current && field.saved) status += "; saved profile value available";
+        if (field.formatHint) status += "; format: " + jaaLlmTruncate(field.formatHint, 100);
         return "- " + field.label + " (" + field.type + "): " + status;
       });
       result += "\n\nDetected form fields (current page state; sensitive inputs excluded):\n" + fieldLines.join("\n");
@@ -103,6 +104,41 @@ async function jaaLlmPageContext(options) {
     return result + "\n\nVisible page text:\n" + jaaLlmTruncate(resp.text);
   } catch (error) {
     throw new Error("Could not read the selected page. Reload that tab and check ApplyOnce's site access.");
+  }
+}
+
+// Chrome captures one viewport at a time. Pass the ordered vertical slices as
+// separate images to Gemma 4. Images never enter saved settings or history.
+async function jaaCapturePageImages(tabId, signal, onProgress) {
+  if (!jaaBrowser.tabs.captureVisibleTab) throw new Error("This browser does not support webpage screenshot capture.");
+  var tab = await jaaBrowser.tabs.get(tabId);
+  if (!tab || !/^https?:/i.test(tab.url || "")) throw new Error("Choose a readable web tab for the page image.");
+  var active = (await jaaBrowser.tabs.query({ active: true, windowId: tab.windowId }))[0];
+  var original = await jaaBrowser.tabs.sendMessage(tabId, { type: "JAA_PAGE_IMAGE_STATE" }, { frameId: 0 });
+  if (!original || !original.viewport) throw new Error("Could not measure the selected page. Reload it and try again.");
+  var slices = Math.max(1, Math.ceil(original.height / original.viewport));
+  var images = [];
+  try {
+    if (!active || active.id !== tabId) await jaaBrowser.tabs.update(tabId, { active: true });
+    for (var i = 0; i < slices; i++) {
+      if (signal) signal.throwIfAborted();
+      await jaaBrowser.tabs.sendMessage(tabId, { type: "JAA_PAGE_IMAGE_STATE", y: Math.min(i * original.viewport, original.height - original.viewport) }, { frameId: 0 });
+      // Chrome permits at most two captureVisibleTab calls per second.
+      if (i) await new Promise(function (resolve) { setTimeout(resolve, 550); });
+      if (signal) signal.throwIfAborted();
+      var current = (await jaaBrowser.tabs.query({ active: true, windowId: tab.windowId }))[0];
+      if (!current || current.id !== tabId) throw new Error("The selected tab changed during capture. Please try again.");
+      images.push(await jaaBrowser.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 75 }));
+      if (onProgress) onProgress(i + 1, slices);
+    }
+    if ((await jaaBrowser.tabs.get(tabId)).url !== tab.url) throw new Error("The selected page navigated during capture. Please try again.");
+    return images;
+  } finally {
+    await jaaBrowser.tabs.sendMessage(tabId, { type: "JAA_PAGE_IMAGE_STATE", y: original.y }, { frameId: 0 }).catch(function () {});
+    var current = (await jaaBrowser.tabs.query({ active: true, windowId: tab.windowId }).catch(function () { return []; }))[0];
+    if (active && active.id !== tabId && current && current.id === tabId) {
+      await jaaBrowser.tabs.update(active.id, { active: true }).catch(function () {});
+    }
   }
 }
 

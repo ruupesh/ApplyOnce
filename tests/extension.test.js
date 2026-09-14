@@ -959,6 +959,73 @@ test('all five provider adapters build requests and extract streamed responses',
   }
 });
 
+test('all hosted adapters send the captured page image in their native request format', async () => {
+  const image = 'data:image/jpeg;base64,QUJD';
+  for (const provider of ['openai', 'groq', 'deepseek', 'anthropic', 'gemini']) {
+    const ctx = loadLlmScript('llm-store.js');
+    ctx.fetch = async (url, request) => {
+      const body = JSON.parse(request.body);
+      if (provider === 'gemini') {
+        assert.deepEqual(body.contents[0].parts[1].inlineData, {mimeType:'image/jpeg',data:'QUJD'});
+        assert.equal(body.contents[0].parts.at(-1).text, 'Read the form');
+        return new Response('data: {"candidates":[{"content":{"parts":[{"text":"Seen"}]}}]}\n\n');
+      }
+      if (provider === 'anthropic') {
+        assert.deepEqual(body.messages[0].content[1].source, {type:'base64',media_type:'image/jpeg',data:'QUJD'});
+        assert.equal(body.messages[0].content.at(-1).text, 'Read the form');
+        return new Response('data: {"type":"content_block_delta","delta":{"text":"Seen"}}\n\n');
+      }
+      assert.equal(body.messages[1].content[1].image_url.url, image);
+      assert.equal(body.messages[1].content.at(-1).text, 'Read the form');
+      return new Response('data: {"choices":[{"delta":{"content":"Seen"}}]}\n\n');
+    };
+    vm.runInContext(fs.readFileSync(path.join(resourcesRoot, 'llm/llm-providers.js'), 'utf8'), ctx);
+    assert.equal(await ctx.sendToLlm({
+      providerId:provider,model:'vision-model',key:'test-key',system:'Help',
+      messages:[{role:'user',content:'Read the form'}],pageImages:[image]
+    }), 'Seen');
+  }
+});
+
+test('Groq image requests carry all page sections through bounded batches', async () => {
+  const ctx = loadLlmScript('llm-store.js');
+  const image = 'data:image/jpeg;base64,QUJD';
+  const requests = [];
+  ctx.fetch = async (url, request) => {
+    const body = JSON.parse(request.body);
+    requests.push(body);
+    const answer = requests.length === 1 ? 'Earlier fields use MM-YYYY' : 'Final answer';
+    return new Response(`data: {"choices":[{"delta":{"content":"${answer}"}}]}\n\n`);
+  };
+  vm.runInContext(fs.readFileSync(path.join(resourcesRoot, 'llm/llm-providers.js'), 'utf8'), ctx);
+  const answer = await ctx.sendToLlm({
+    providerId:'groq',model:'qwen/qwen3.6-27b',key:'test-key',system:'Help',
+    messages:[{role:'user',content:'Read all fields'}],pageImages:[image,image,image,image]
+  });
+  assert.equal(answer, 'Final answer');
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].messages[1].content.filter(part => part.type === 'image_url').length, 3);
+  assert.equal(requests[1].messages[1].content.filter(part => part.type === 'image_url').length, 1);
+  assert.match(requests[1].messages[1].content.at(-1).text, /Earlier fields use MM-YYYY/);
+});
+
+test('hosted agent follow-up keeps page images on its most recent user turn', async () => {
+  const ctx = loadLlmScript('llm-store.js');
+  ctx.fetch = async (url, request) => {
+    const body = JSON.parse(request.body);
+    assert.equal(body.messages[1].content[1].image_url.url, 'data:image/jpeg;base64,QUJD');
+    assert.equal(body.messages[2].role, 'tool');
+    return new Response('data: {"choices":[{"delta":{"content":"Seen"}}]}\n\n');
+  };
+  vm.runInContext(fs.readFileSync(path.join(resourcesRoot, 'llm/llm-providers.js'), 'utf8'), ctx);
+  const reply = await ctx.sendToLlmWithTools({
+    providerId:'openai',model:'gpt-4o',key:'test-key',system:'Help',
+    messages:[{role:'user',content:'Inspect page'}, {role:'tool',content:'Form fields',toolCallId:'call-1'}],
+    pageImages:['data:image/jpeg;base64,QUJD']
+  });
+  assert.equal(reply.text, 'Seen');
+});
+
 test('assistant settings migrate precision and discard invalid conversation entries', async () => {
   const ctx = loadLlmScript('llm-store.js', { jaaBrowser: { storage: { local: { get: async () => ({ jaaLLM: {
     localDtype: 'q4f16',
@@ -1042,7 +1109,8 @@ test('page context selects the most recent web tab while the editor is active', 
       assert.equal(id, 3);
       if (message.type === 'JAA_AGENT_INSPECT_FORM') return {fields:[
         {label:'First name',type:'text',current:'Alex',saved:'Alex'},
-        {label:'Phone',type:'tel',current:'',saved:'555-0100'}
+        {label:'Phone',type:'tel',current:'',saved:'555-0100'},
+        {label:'Start date',type:'text',current:'',saved:'March 2025',formatHint:'MM-YYYY'}
       ]};
       return { title: 'Job', url: 'https://example.com/job', text: 'Engineer' };
     }
@@ -1051,6 +1119,124 @@ test('page context selects the most recent web tab while the editor is active', 
   assert.match(page, /Engineer/);
   assert.match(page, /First name \(text\): filled: Alex/);
   assert.match(page, /Phone \(tel\): empty; saved profile value available/);
+  assert.match(page, /Start date \(text\): empty; saved profile value available; format: MM-YYYY/);
+});
+
+test('full-page capture visits every viewport and restores the tab and scroll position', async () => {
+  const actions = [];
+  let y = 240;
+  let active = 9;
+  const ctx = loadLlmScript('llm-tools.js', {
+    setTimeout: callback => callback(),
+    jaaBrowser: { tabs: {
+      get: async () => ({id: 7, windowId: 2, url: 'https://example.com/apply'}),
+      query: async () => [{id: active}],
+      update: async (id, options) => { actions.push(['active', id]); active = id; },
+      sendMessage: async (id, message) => {
+        if (typeof message.y === 'number') { y = message.y; actions.push(['scroll', y]); }
+        return {y, height: 2250, viewport: 1000};
+      },
+      captureVisibleTab: async () => { actions.push(['capture', y, active]); return `data:image/jpeg;base64,${y}`; }
+    } }
+  });
+  const images = await ctx.jaaCapturePageImages(7);
+  assert.equal(images.length, 3);
+  assert.deepEqual(actions, [
+    ['active', 7], ['scroll', 0], ['capture', 0, 7],
+    ['scroll', 1000], ['capture', 1000, 7],
+    ['scroll', 1250], ['capture', 1250, 7],
+    ['scroll', 240], ['active', 9]
+  ]);
+});
+
+test('full-page capture has no 16-viewport cutoff', async () => {
+  let captures = 0;
+  const ctx = loadLlmScript('llm-tools.js', {
+    setTimeout: callback => callback(),
+    jaaBrowser: { tabs: {
+      get: async () => ({id: 7, windowId: 2, url: 'https://example.com/apply'}),
+      query: async () => [{id: 7}],
+      sendMessage: async () => ({y: 0, height: 18000, viewport: 1000}),
+      captureVisibleTab: async () => { captures++; return 'data:image/jpeg;base64,AA'; }
+    } }
+  });
+  assert.equal((await ctx.jaaCapturePageImages(7)).length, 18);
+  assert.equal(captures, 18);
+});
+
+test('Gemma page images use the multimodal processor and vision model', async () => {
+  const modelId = 'onnx-community/gemma-4-E4B-it-ONNX';
+  const calls = [];
+  const processor = async (prompt, images) => {
+    calls.push(['processed', images.length]);
+    return {input_ids: {dims: [1, 300]}};
+  };
+  processor.apply_chat_template = (messages, options) => {
+    calls.push(['template', messages.at(-1).content.map(part => part.type), options.enable_thinking]);
+    return 'prompt';
+  };
+  processor.tokenizer = {};
+  const ctx = loadLlmScript('llm-local.js', {
+    fetch: async () => ({blob: async () => ({})})
+  });
+  ctx.jaaLocalDevice = async () => 'webgpu';
+  ctx.jaaLoadLocalModule = async () => ({
+    Gemma4ForConditionalGeneration: {from_pretrained: async (id, options) => {
+      calls.push(['model', id, options.dtype]);
+      return {dispose: async () => {}, generate: async options => {
+        calls.push(['generated', options.pixel_values, options.max_new_tokens]);
+        options.streamer.callback_function('Answer');
+      }};
+    }},
+    AutoProcessor: {from_pretrained: async () => processor},
+    RawImage: {fromBlob: async () => ({width: 100})},
+    TextStreamer: class {constructor(tokenizer, options) {this.callback_function = options.callback_function;}},
+    InterruptableStoppingCriteria: class {}
+  });
+  const answer = await ctx.jaaGenerateLocalLlm({
+    model: modelId, system: 'Help', messages: [{role: 'user', content: 'Read the date format'}],
+    pageImages: ['data:image/jpeg;base64,AA', 'data:image/jpeg;base64,BB'],
+    parameters: {contextWindow: 512, maxNewTokens: 256, enableThinking: false}
+  });
+  assert.equal(answer, 'Answer');
+  assert.deepEqual(calls[0], ['model', modelId, 'q4f16']);
+  assert.deepEqual([calls[1][0], Array.from(calls[1][1]), calls[1][2]], ['template', ['image', 'image', 'text'], false]);
+  assert.deepEqual(calls[2], ['processed', 2]);
+  assert.deepEqual(calls[3], ['generated', undefined, 212]);
+});
+
+test('Gemma processes a long page in ordered image batches', async () => {
+  const imageCounts = [];
+  const prompts = [];
+  let generated = 0;
+  const processor = async (prompt, images) => {
+    imageCounts.push(images.length);
+    return {input_ids: {dims: [1, 600]}};
+  };
+  processor.apply_chat_template = messages => { prompts.push(messages.at(-1).content.at(-1).text); return 'prompt'; };
+  processor.tokenizer = {};
+  const ctx = loadLlmScript('llm-local.js', {fetch: async () => ({blob: async () => ({})})});
+  ctx.jaaLocalDevice = async () => 'webgpu';
+  ctx.jaaLoadLocalModule = async () => ({
+    Gemma4ForConditionalGeneration: {from_pretrained: async () => ({
+      dispose: async () => {},
+      generate: async options => { generated++; options.streamer.callback_function(`Section ${generated}`); }
+    })},
+    AutoProcessor: {from_pretrained: async () => processor},
+    RawImage: {fromBlob: async () => ({width: 100})},
+    TextStreamer: class {constructor(tokenizer, options) {this.callback_function = options.callback_function;}},
+    InterruptableStoppingCriteria: class {}
+  });
+  const pageImages = Array.from({length: 18}, () => 'data:image/jpeg;base64,AA');
+  const answer = await ctx.jaaGenerateLocalLlm({
+    model: 'onnx-community/gemma-4-E4B-it-ONNX', system: 'Help',
+    messages: [{role: 'user', content: 'Find the date format'}], pageImages,
+    parameters: {contextWindow: 4096, maxNewTokens: 256}
+  });
+  assert.equal(answer, 'Section 3');
+  assert.deepEqual(imageCounts, [8, 8, 2]);
+  assert.match(prompts[1], /Earlier page notes: Section 1/);
+  assert.match(prompts[2], /Notes from earlier sections.*Section 2/s);
 });
 
 test('removing a local model preserves unrelated cached models', async () => {
