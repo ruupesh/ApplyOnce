@@ -27,6 +27,25 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
   var customFillQueue = Promise.resolve();
   var oracleFillQueue = Promise.resolve();
   var automatedContainer = null;
+  // Page-only edits belong to the reviewed task, even after React replaces
+  // their input nodes. Passive profile autofill must not overwrite them.
+  var agentOwnedFields = new Set();
+  var agentWriteActive = false;
+  var pendingDateFills = new Set();
+  var agentActionsAllowed = false;
+  var agentPassiveWrite = false;
+  var pageTools = jaaCreatePageTools({
+    authorize: requireAgentActions,
+    ownField: function (el, value) {
+      var label = getElementLabelAliases(el)[0];
+      if (el.type === "radio") {
+        var group = getRadioGroups().find(function (radios) { return radios.indexOf(el) !== -1; });
+        if (group) label = getGroupLabel(group);
+      }
+      agentOwnedFields.add(getAgentFieldRef(el, label));
+      el.setAttribute(FILLED_MARK, String(value || ""));
+    }
+  });
 
   init();
 
@@ -37,6 +56,7 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
     if (enabled) startScanning();
 
     jaaBrowser.storage.onChanged.addListener(function (changes, area) {
+      if (area === "local" && changes.jaaPageActionsAllowed) agentActionsAllowed = changes.jaaPageActionsAllowed.newValue === true;
       if (area === "local" && changes[JAA_STORAGE_KEY]) {
         var wasEnabled = enabled;
         state = changes[JAA_STORAGE_KEY].newValue || jaaDefaultState();
@@ -52,6 +72,19 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
 
     jaaBrowser.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       if (!msg) return false;
+      // Only extension pages may invoke the assistant interface. Content
+      // scripts have sender.tab; no webpage postMessage bridge is installed.
+      if (/^JAA_AGENT_/.test(msg.type) && (sender.tab || sender.id && sender.id !== jaaBrowser.runtime.id)) {
+        sendResponse({ ok: false, error: "Agent requests must originate in the extension." });
+        return false;
+      }
+      if (msg.type === "JAA_AGENT_PAGE_TOOL") {
+        runPageTool(msg.tool, msg.args).then(sendResponse).catch(function (error) {
+          if (typeof jaaDiagnostics !== 'undefined') jaaDiagnostics.log('page_tool_error', { tool: msg.tool, code: error.code || 'TOOL_ERROR' });
+          sendResponse({ ok: false, error: String(error.message || error), code: error.code || 'TOOL_ERROR' });
+        });
+        return true;
+      }
       if (msg.type === "JAA_RESCAN") {
         if (enabled) {
           startScanning();
@@ -82,7 +115,7 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
         });
         return true;
       } else if (msg.type === "JAA_AGENT_SET_FIELDS") {
-        agentSetFields(msg.fields).then(sendResponse).catch(function (error) {
+        agentSetFields(msg.fields, msg.scoped === true).then(sendResponse).catch(function (error) {
           sendResponse({ ok: false, error: String((error && error.message) || error) });
         });
         return true;
@@ -94,10 +127,38 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
         });
         return true;
       } else if (msg.type === "JAA_AGENT_SCROLL_TO") {
-        sendResponse(agentScrollTo(msg));
+        requireAgentActions().then(function () { return agentScrollTo(msg); }).then(sendResponse).catch(function (error) {
+          sendResponse({ ok: false, error: String(error.message || error) });
+        });
+        return true;
       }
       return false; // always responded synchronously above
     });
+  }
+
+  async function requireAgentActions() {
+    var current = await getState();
+    if (!jaaShouldRunOnHost(current, location.hostname)) {
+      var reason = current.enabled === false ? 'ApplyOnce is switched off for all websites.' :
+        current.siteMode === 'allowlist' ? 'This site is missing from your allowed websites list.' : 'This site is in your blocked websites list.';
+      var error = new Error("ApplyOnce actions are disabled for this website. " + reason);
+      error.code = 'SITE_ACTIONS_DISABLED';
+      throw error;
+    }
+    await jaaRequirePageActions();
+    agentActionsAllowed = true;
+  }
+
+  function checkAgentActionInProgress() {
+    if (agentWriteActive && !agentPassiveWrite && !agentActionsAllowed) throw new Error("Page actions were disabled while editing.");
+  }
+
+  async function runPageTool(tool, args) {
+    if (tool !== "page_action") return pageTools.run(tool, args);
+    if (agentWriteActive) throw new Error("A page edit is already running.");
+    agentWriteActive = true;
+    try { return await pageTools.run(tool, args); }
+    finally { agentWriteActive = false; }
   }
 
   // Kick off the first scan and watch the page for later changes. Held back
@@ -189,7 +250,8 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
   }
 
   function isFillable(el) {
-    if (el.disabled || el.readOnly) return false;
+    if (el.disabled || el.closest && el.closest('[aria-disabled="true"]')) return false;
+    if (el.readOnly && !isWorkdayDateSectionInput(el)) return false;
     var tag = el.tagName;
     if (tag === "TEXTAREA" || tag === "SELECT") return true;
     if (tag === "INPUT") {
@@ -273,6 +335,9 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
   // double-process it here.
   function isPlainNativeContainer(container) {
     if (container.querySelector('input[type="file"]')) return true;
+    // A date picker's calendar button is an alternative way to edit the
+    // same date, not a dropdown answer. Keep its individual segments visible.
+    if (container.querySelector('input[data-automation-id="dateSectionMonth-input"], input[data-automation-id="dateSectionDay-input"], input[data-automation-id="dateSectionYear-input"]')) return true;
     if (container.querySelector('[data-automation-id="promptOption"]')) return false;
     if (container.querySelector("button")) return false;
     var input = container.querySelector("input, select, textarea");
@@ -578,6 +643,7 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
   }
 
   function setNativeValue(el, value) {
+    checkAgentActionInProgress();
     var proto = el.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
     var desc = Object.getOwnPropertyDescriptor(proto, "value");
     if (desc && desc.set) {
@@ -737,48 +803,54 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
   function isWorkdayDateSectionInput(el) {
     return !!(
       el &&
-      /^(?:dateSectionMonth|dateSectionYear)-input$/.test(el.getAttribute("data-automation-id") || "") &&
+      el.getAttribute && /^(?:dateSectionMonth|dateSectionDay|dateSectionYear)-input$/.test(el.getAttribute("data-automation-id") || "") &&
       el.parentElement
     );
   }
 
-  // Workday's segmented month/year control keeps its real value in React
-  // state. Assigning the nested input's value makes the date look filled but
-  // leaves that state empty, so validation later reports "From is required".
-  // Send the same key sequence the control handles for keyboard entry instead.
+  // Passive autofill uses the same asynchronous date editor as reviewed
+  // actions. Synchronous keyboard bursts lose digits during React updates.
   function setWorkdayDateSectionValue(el, value) {
-    var text = String(value == null ? "" : value).replace(/\D/g, "");
-    var section = el.parentElement;
-    if (!text || !section) return false;
+    var text = String(value == null ? "" : value).trim();
+    var ref = getAgentFieldRef(el, getElementLabelAliases(el)[0]);
+    if (/^\d+$/.test(el.value) && /^\d+$/.test(text) && Number(el.value) === Number(text)) return false;
+    if (!/^\d+$/.test(text) || pendingDateFills.has(ref)) return false;
+    pendingDateFills.add(ref);
+    customFillQueue = customFillQueue.then(async function () {
+      if (agentWriteActive || agentOwnedFields.has(ref)) return;
+      var input = getFormFields().find(function (candidate) { return getAgentFieldRef(candidate, getElementLabelAliases(candidate)[0]) === ref; });
+      if (!input || input.dataset.jaaUserEdited || input.value && input.value !== input.getAttribute(FILLED_MARK)) return;
+      // Keep failed automatic writes from being retried by every mutation
+      // scan. A reviewed action can still explicitly retry this field.
+      var result = await agentSetFields([{ field: ref, value: text }], true, true);
+      if (result.updatedCount) {
+        var current = getFormFields().find(function (candidate) { return getAgentFieldRef(candidate, getElementLabelAliases(candidate)[0]) === ref; });
+        if (current) current.setAttribute(FILLED_MARK, current.value);
+        agentOwnedFields.delete(ref);
+      }
+    }).catch(function (error) {
+      logActivity("replay-fail", ref, String(error.message || error));
+    }).finally(function () {
+      pendingDateFills.delete(ref);
+    });
+    return false; // Completion is reported asynchronously by the editor.
+  }
 
-    if (section.focus) section.focus();
-    ["keydown", "keyup"].forEach(function (type) {
-      section.dispatchEvent(new KeyboardEvent(type, {
-        bubbles: true,
-        cancelable: true,
-        key: "Backspace",
-        code: "Backspace",
-        keyCode: 8,
-        which: 8
-      }));
-    });
-    text.split("").forEach(function (character) {
-      ["keydown", "keypress", "keyup"].forEach(function (type) {
-        section.dispatchEvent(new KeyboardEvent(type, {
-          bubbles: true,
-          cancelable: true,
-          key: character,
-          code: "Digit" + character,
-          keyCode: character.charCodeAt(0),
-          which: character.charCodeAt(0)
-        }));
-      });
-    });
-    if (section.blur) section.blur();
-    return Number(el.value) === Number(text);
+  async function setAgentDateSectionValue(el, value) {
+    var token = "jaa_date_" + Date.now().toString(36) + Math.random().toString(36).slice(2);
+    el.setAttribute("data-jaa-date-edit", token);
+    try {
+      var result = await jaaBrowser.runtime.sendMessage({ type: "JAA_MAIN_SET_DATE_SECTION", token: token, value: String(value), agent: agentWriteActive && !agentPassiveWrite });
+      return result || { ok: false, error: "The date editor returned no result. Reload ApplyOnce and the webpage." };
+    } catch (error) {
+      return { ok: false, error: String(error.message || error) };
+    } finally {
+      el.removeAttribute("data-jaa-date-edit");
+    }
   }
 
   function setElementValue(el, value) {
+    checkAgentActionInProgress();
     if (el.type === "file") return false;
     if (isWorkdayDateSectionInput(el)) return setWorkdayDateSectionValue(el, value);
     if (el.tagName === "SELECT") {
@@ -861,7 +933,10 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
         // A real keystroke, paste, or clear hands ownership of this field to
         // the user. Mark it now (isTrusted rules out our own synthetic fill
         // events) so the next scan won't restore what they just backspaced.
-        if (evt && evt.isTrusted) el.dataset.jaaUserEdited = "1";
+        if (evt && evt.isTrusted && !agentWriteActive) {
+          el.dataset.jaaUserEdited = "1";
+          agentOwnedFields.delete(getAgentFieldRef(el, label));
+        }
         clearTimeout(debounceT);
         debounceT = setTimeout(function () {
           if (isOraclePage()) {
@@ -901,7 +976,7 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
     // autofill it again this page visit. Without this, backspacing an
     // autofilled value just gets it restored on the next scan, and the
     // edit-save never wins the race.
-    if (el.dataset.jaaUserEdited) return false;
+    if (el.dataset.jaaUserEdited || agentOwnedFields.has(getAgentFieldRef(el, label))) return false;
 
     var filled = false;
     var oracleDerivedValue = isOraclePage() ? getOracleDerivedNativeValue(state, el) : "";
@@ -937,6 +1012,7 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
 
   function onUserEdit(el, label, matchedKeyAtScanTime, labelAliases) {
     if (SENSITIVE_LABEL_RE.test(label)) return;
+    if (agentWriteActive || agentOwnedFields.has(getAgentFieldRef(el, label))) return;
     if (el.type === "file") {
       var selectedFile = el.files && el.files[0];
       if (!selectedFile) return;
@@ -964,6 +1040,7 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
     var labelAliases = uniqueLabelAliases(groupLabel, [radios[0].name]);
     if (!groupLabel || SENSITIVE_LABEL_RE.test(groupLabel)) return false;
     var key = findMatchingKeyForAliases(state, labelAliases);
+    if (agentOwnedFields.has(getAgentFieldRef(radios[0], groupLabel))) return false;
 
     radios.forEach(function (r) {
       if (r.dataset.jaaListener) return;
@@ -1678,7 +1755,6 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
   // A row is a `menuItem`; `promptLeafNode` is its inner clickable child.
   // Matching on both (as an earlier version did) double-counts every row.
   var MENU_ROW_SELECTOR = '[data-automation-id="menuItem"]';
-  var MENU_ITEM_SELECTOR = '[data-automation-id="menuItem"], [data-automation-id="promptLeafNode"]';
 
   // ---------- Click-path recording ----------
   //
@@ -1757,6 +1833,7 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
   // lives on the inner `promptLeafNode`, and it wants a real pointer/mouse
   // sequence rather than a synthetic click alone.
   function realClick(el) {
+    checkAgentActionInProgress();
     var r = el.getBoundingClientRect();
     var o = {
       bubbles: true,
@@ -2094,6 +2171,7 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
         searchInput.setAttribute("data-jaa-main-edit", editToken);
         var mainEdit = await jaaBrowser.runtime.sendMessage({
           type: "JAA_MAIN_REPLACE_TEXT",
+          agent: agentWriteActive && !agentPassiveWrite,
           token: editToken,
           value: String(want)
         });
@@ -2200,6 +2278,7 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
     var labelAliases = getContainerLabelAliases(container);
     var label = labelAliases[0];
     if (!label || SENSITIVE_LABEL_RE.test(label)) return false;
+    if (agentOwnedFields.has(getAgentFieldRef(container, label))) return false;
 
     attachRecordingTrigger(container);
 
@@ -2290,7 +2369,8 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
     }
   }
 
-  function scanAndFill(force, nativeOnly) {
+  function scanAndFill(force, nativeOnly, fromAgent) {
+    if (agentWriteActive && !fromAgent) return;
     if (!enabled && !force) return;
     var fields = getFormFields();
     var workdayContainers = getWorkdayFieldContainers();
@@ -2340,6 +2420,10 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
   }
 
   function isRequiredControl(control, label) {
+    if (isWorkdayDateSectionInput(control)) {
+      var dateContainer = control.closest('[data-automation-id^="formField-"]');
+      if (dateContainer && isRequiredControl(dateContainer, getContainerLabel(dateContainer))) return true;
+    }
     return !!(
       (control && (control.required || control.getAttribute("aria-required") === "true")) ||
       /\*\s*$/.test(String(label || ""))
@@ -2350,7 +2434,7 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
   // review, and targeted edits, so all four agree about the page's state.
   function getPageFieldInventory() {
     var items = [];
-    function add(labelAliases, type, current, required, key, ref, formatHint) {
+    function add(labelAliases, type, current, required, key, ref, formatHint, options, datePart) {
       var label = labelAliases[0];
       if (!label || SENSITIVE_LABEL_RE.test(label)) return;
       var matchedKey = key || findMatchingKeyForAliases(state, labelAliases);
@@ -2361,10 +2445,12 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
         ref: ref || slugify(label),
         key: matchedKey || "",
         type: type,
-        current: value.slice(0, 300),
+        current: value,
         saved: saved == null ? "" : String(saved).slice(0, 300),
         required: !!required,
         formatHint: formatHint || "",
+        options: options || [],
+        datePart: datePart || "",
         empty: !value,
         fillable: !!saved && !value
       });
@@ -2389,7 +2475,12 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
         return description ? cleanText(description.textContent) : "";
       }).filter(Boolean).join(" ");
       var formatHint = [el.getAttribute("placeholder"), el.getAttribute("pattern"), describedBy].filter(Boolean).join("; ");
-      add(aliases, elementType(el), current, isRequiredControl(el, label), key, getAgentFieldRef(el, label), formatHint.slice(0, 160));
+      var choices = el.tagName === "SELECT" ? Array.from(el.options).filter(function (option) { return !option.disabled; }).map(function (option) {
+        return { value: option.value, label: cleanText(option.textContent) };
+      }) : el.type === "checkbox" ? [{ value: "Yes", label: "Yes" }, { value: "No", label: "No" }] : [];
+      var segment = (el.getAttribute("data-automation-id") || "").match(/^dateSection(Month|Day|Year)-input$/);
+      if (segment) formatHint = "Separate " + segment[1].toLowerCase() + " segment (" + (segment[1] === "Year" ? "YYYY" : segment[1] === "Month" ? "MM" : "DD") + ")";
+      add(aliases, elementType(el), current, isRequiredControl(el, label), key, getAgentFieldRef(el, label), formatHint.slice(0, 160), choices, segment ? segment[1].toLowerCase() : "");
     });
     getRadioGroups().forEach(function (radios) {
       // Workday radio groups are also represented by their formField
@@ -2399,7 +2490,9 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
       var aliases = uniqueLabelAliases(label, [radios[0].name]);
       var key = findMatchingKeyForAliases(state, aliases);
       var checked = radios.find(function (radio) { return radio.checked; });
-      add(aliases, "radio", checked ? cleanText(getLabelText(checked)) : "", radios.some(function (radio) { return isRequiredControl(radio, label); }), key, getAgentFieldRef(radios[0], label));
+      add(aliases, "radio", checked ? cleanText(getLabelText(checked)) : "", radios.some(function (radio) { return isRequiredControl(radio, label); }), key, getAgentFieldRef(radios[0], label), "", radios.map(function (radio) {
+        return { value: radio.value, label: cleanText(getLabelText(radio)) };
+      }));
     });
     getOraclePillRows().forEach(function (row) {
       var aliases = getOracleRowLabelAliases(row);
@@ -2446,7 +2539,7 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
         add([section.heading], "repeatable-section", "", false, savedKey || null, slugify(section.heading));
       });
     }
-    return items.slice(0, 120);
+    return items;
   }
 
   // Read-only form plan for the Assistant. Current values are exposed only
@@ -2459,10 +2552,11 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
       // is gathered separately via JAA_AGENT_GET_VALIDATION.
       item.isVisible = true; // All items from getPageFieldInventory are already filtered to visible.
     });
-    return { ok: true, title: document.title || location.hostname, url: location.href, fields: items.slice(0, 200) };
+    return { ok: true, title: document.title || location.hostname, url: location.href, fields: items };
   }
 
   async function agentFillForm() {
+    await requireAgentActions();
     state = await getState();
     var before = getAgentFormSnapshot();
     var savedPageFields = [];
@@ -2552,31 +2646,76 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
     }
   }
 
-  async function agentSetFields(changes) {
+  async function agentSetFields(changes, scoped, passive) {
+    if (!passive) await requireAgentActions();
+    if (agentWriteActive) throw new Error("A page edit is already running. Wait for verification before applying again.");
+    agentWriteActive = true;
+    agentPassiveWrite = passive === true;
+    try {
+      return await applyAgentFields(changes, scoped);
+    } finally {
+      agentWriteActive = false;
+      agentPassiveWrite = false;
+    }
+  }
+
+  async function applyAgentFields(changes, scoped) {
     state = await getState();
     var requested = Array.isArray(changes) ? changes.slice(0, 30) : [];
     var updated = [];
-    await ensureWorkdayAgentSections(requested);
-    getFormFields().forEach(function (el) {
-      if (el.type === "radio" || el.type === "file") return;
+    var attempts = new Map();
+    if (scoped) requested.forEach(function (change) { agentOwnedFields.add(change.field); });
+    if (!scoped) await ensureWorkdayAgentSections(requested);
+    for (var el of getFormFields()) {
+      if (el.type === "radio" || el.type === "file") continue;
       var aliases = getElementLabelAliases(el);
       var label = aliases[0];
-      if (!label || SENSITIVE_LABEL_RE.test(label)) return;
+      if (!label || SENSITIVE_LABEL_RE.test(label)) continue;
       var key = findAgentFieldKey(state, el, label, aliases);
       var ref = getAgentFieldRef(el, label);
       var match = requested.find(function (change) {
+        if (scoped) return change.field === ref;
         var wanted = normalizeLabel(change.field).replace(/\s+/g, "");
         return wanted && ([ref, key].concat(aliases)).filter(Boolean).some(function (candidate) {
           return normalizeLabel(candidate).replace(/\s+/g, "") === wanted;
         });
       });
-      if (!match) return;
+      if (!match) continue;
+      if (!agentPassiveWrite) await requireAgentActions();
+      if (el.isConnected === false) {
+        el = getFormFields().find(function (candidate) { return getAgentFieldRef(candidate, getElementLabelAliases(candidate)[0]) === ref; });
+        if (!el) continue;
+      }
       delete el.dataset.jaaUserEdited;
       el.setAttribute(FILLED_MARK, String(match.value));
-      if (setElementValue(el, match.value)) {
+      var attempt;
+      try {
+        attempt = isWorkdayDateSectionInput(el)
+          ? await setAgentDateSectionValue(el, match.value)
+          : { ok: setElementValue(el, match.value), method: "native-input" };
+      } catch (error) {
+        attempt = { ok: false, error: String(error.message || error) };
+      }
+      attempts.set(match.field, Object.assign({ ref: ref, label: label }, attempt));
+      if (attempt.ok) {
         updated.push(label);
         logActivity("filled", label, match.value);
+      } else {
+        el.removeAttribute(FILLED_MARK);
       }
+    }
+
+    if (scoped) getRadioGroups().forEach(function (radios) {
+      checkAgentActionInProgress();
+      var label = getGroupLabel(radios);
+      var ref = getAgentFieldRef(radios[0], label);
+      var change = requested.find(function (item) { return item.field === ref; });
+      if (!change || SENSITIVE_LABEL_RE.test(label)) return;
+      var target = radios.find(function (radio) {
+        return !radio.disabled && (radio.value === change.value || cleanText(getLabelText(radio)) === change.value);
+      });
+      if (target && !target.checked) { target.click(); fireEvents(target); updated.push(label); }
+      attempts.set(change.field, { ref: ref, label: label, ok: !!target && target.checked, method: "radio" });
     });
 
     // Target Workday's button/autocomplete widgets directly. This is needed
@@ -2593,12 +2732,14 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
       var widgetRef = getAgentFieldRef(container, widgetLabel);
       var widgetKey = findAgentFieldKey(state, container, widgetLabel, widgetAliases);
       var widgetMatch = requested.find(function (change) {
+        if (scoped) return change.field === widgetRef;
         var wanted = normalizeLabel(change.field).replace(/\s+/g, "");
         return wanted && ([widgetRef, widgetKey].concat(widgetAliases)).filter(Boolean).some(function (candidate) {
           return normalizeLabel(candidate).replace(/\s+/g, "") === wanted;
         });
       });
       if (!widgetMatch) continue;
+      if (!agentPassiveWrite) await requireAgentActions();
 
       var before = readWorkdayContainerValue(container);
       var isMulti = isWorkdayMultiSelectContainer(container, widgetLabel);
@@ -2615,28 +2756,40 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
         }
       }
       if (readWorkdayContainerValue(container) !== before) updated.push(widgetLabel);
+      attempts.set(widgetMatch.field, { ref: widgetRef, label: widgetLabel, ok: values.every(function (value) {
+        return readWorkdayContainerValue(container).split(",").some(function (current) { return workdaySelectedValueMatches(current, value); });
+      }), method: "workday-options", error: "No matching option was committed by the control" });
     }
     // Custom widgets use their existing exact-match adapters after the saved
     // profile values above have changed.
-    if (/myworkday(?:jobs|site)\.com$/i.test(location.hostname)) {
+    if (scoped || /myworkday(?:jobs|site)\.com$/i.test(location.hostname)) {
       await new Promise(function (resolve) { setTimeout(resolve, 250); });
     } else {
-      scanAndFill(true);
+      scanAndFill(true, false, true);
       await new Promise(function (resolve) { setTimeout(resolve, 1600); });
     }
     var afterFields = getPageFieldInventory();
     var results = requested.map(function (change) {
-      var wasUpdated = updated.some(function (label) {
-        return normalizeLabel(label) === normalizeLabel(change.field.replace(/_/g, " "));
-      });
-      return { field: change.field, status: wasUpdated ? "filled" : "skipped", value: change.value };
+      var attempt = attempts.get(change.field);
+      var field = afterFields.find(function (entry) { return entry.ref === (attempt ? attempt.ref : change.field); });
+      var actual = field ? field.current : "";
+      var matches = actual === String(change.value).trim() || !!field && field.datePart && /^\d+$/.test(actual) && /^\d+$/.test(String(change.value)) && Number(actual) === Number(change.value) ||
+        !!field && (field.options || []).some(function (option) { return option.value === change.value && option.label === actual; });
+      var ok = !!attempt && attempt.ok && !!matches;
+      return { field: change.field, label: field ? field.label : attempt ? attempt.label : change.field,
+        status: ok ? "filled" : "failed", value: change.value, actual: actual,
+        method: attempt && attempt.method || "unavailable",
+        error: ok ? "" : !attempt ? "No supported editable control matched this field" :
+          !attempt.ok ? attempt.error || "The control rejected the value" : "The value changed after editing" };
     });
-    return { ok: true, updated: updated, updatedCount: updated.length, results: results, fields: afterFields };
+    var verified = results.filter(function (result) { return result.status === "filled"; });
+    return { ok: true, updated: verified.map(function (result) { return result.label; }), updatedCount: verified.length, results: results, fields: afterFields };
   }
 
   // ---------- Saving (fills the profile, including brand-new fields) ----------
 
   function saveFieldValue(existingKey, label, value, type, recordedPath, labelAliases) {
+    if (agentWriteActive) return saveQueue;
     saveQueue = saveQueue.then(function () {
       return doSaveFieldValue(existingKey, label, value, type, recordedPath, labelAliases);
     });
@@ -2916,68 +3069,16 @@ detail are never read, filled, or saved — see SENSITIVE_LABEL_RE below.
     return { ok: true, fieldErrors: fieldErrors, pageErrors: pageErrors };
   }
 
-  var JAA_AGENT_SAFE_CLICK_ROLES = ["button", "link", "tab", "menuitem", "option", "switch", "checkbox"];
-  var JAA_AGENT_CLICK_BLOCKED_RE = /\b(submit\s+application|confirm\s+submission|pay\s+now|place\s+order|delete|remove\s+all)\b/i;
-
   async function agentClickElement(msg) {
-    var text = String(msg.text || "").trim();
-    var role = msg.role || "";
-    var selector = msg.selector || "";
-    if (!text && !selector) return { ok: false, error: "No text or selector provided." };
-
-    // Find candidate elements.
-    var candidates = [];
-    var scope = document;
-
-    if (selector) {
-      try {
-        var bySelector = scope.querySelectorAll(selector);
-        Array.prototype.forEach.call(bySelector, function (el) { candidates.push(el); });
-      } catch (e) { /* invalid selector, fall through to text match */ }
-    }
-
-    if (text) {
-      // Search clickable elements by text content.
-      var clickableSelectors = "button, a, [role='button'], [role='link'], [role='tab'], [role='menuitem'], input[type='button'], input[type='submit'], summary";
-      var allClickable = scope.querySelectorAll(clickableSelectors);
-      var normalizedText = text.toLowerCase().trim();
-      Array.prototype.forEach.call(allClickable, function (el) {
-        var elText = cleanText(el.textContent || el.value || el.getAttribute("aria-label") || el.title || "").toLowerCase();
-        if (elText === normalizedText || elText.indexOf(normalizedText) !== -1) {
-          if (candidates.indexOf(el) === -1) candidates.push(el);
-        }
-      });
-    }
-
-    // Filter to visible, safe elements.
-    candidates = candidates.filter(function (el) {
-      var rect = el.getBoundingClientRect();
-      if (rect.width <= 0 || rect.height <= 0) return false;
-      // Role filter if specified.
-      if (role) {
-        var elRole = el.getAttribute("role") || el.tagName.toLowerCase();
-        if (elRole === "a") elRole = "link";
-        if (elRole !== role && JAA_AGENT_SAFE_CLICK_ROLES.indexOf(elRole) === -1) return false;
-      }
-      return true;
+    await requireAgentActions();
+    var found = await pageTools.run("find_elements", {
+      selector: msg.selector, text: msg.text, role: msg.role, visible: true, limit: 2
     });
-
-    if (!candidates.length) return { ok: false, error: "No matching clickable element found for: " + (text || selector) };
-
-    var target = candidates[0];
-    // Safety: block dangerous actions.
-    var targetText = cleanText(target.textContent || target.value || "");
-    if (JAA_AGENT_CLICK_BLOCKED_RE.test(targetText)) {
-      return { ok: false, error: "Blocked: clicking '" + targetText.slice(0, 60) + "' is not allowed. ApplyOnce never submits forms or triggers destructive actions." };
-    }
-    // Block actual form submission.
-    if (target.type === "submit" && target.closest("form")) {
-      return { ok: false, error: "Blocked: cannot click submit buttons. ApplyOnce never submits forms." };
-    }
-
-    realClick(target);
-    await new Promise(function (resolve) { setTimeout(resolve, 500); });
-    return { ok: true, clicked: targetText.slice(0, 100), tag: target.tagName.toLowerCase() };
+    if (found.total !== 1) throw new Error("Click requires exactly one match. Search and narrow the target first.");
+    var args = { action: "click", ref: found.elements[0].ref, documentId: found.documentId, url: found.url };
+    var preview = await pageTools.run("preview_action", args);
+    args.expected = preview.target;
+    return runPageTool("page_action", args);
   }
 
   function agentScrollTo(msg) {

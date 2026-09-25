@@ -20,6 +20,37 @@ var jaaLocalPipeline = null; // { key, generator }
 var jaaLocalWorker = null;
 var jaaLocalRequest = 0;
 
+// Transformers.js 4.2.0 drops num_logits_to_keep in Gemma's conditional
+// forward path (upstream #1666, fixed by #1681 but not yet released).
+// Guard the actual ONNX generation feed: changing generate() options alone
+// does not reach that decoder. This applies to our generation-only sessions.
+function jaaLocalGuardGenerationLogits(model) {
+  Object.values(model && model.sessions || {}).forEach(function (session) {
+    if (!session.inputNames || !session.inputNames.includes("num_logits_to_keep") || session.jaaLastTokenLogits) return;
+    var run = session.run;
+    session.run = function (feeds) {
+      var logits = feeds.num_logits_to_keep;
+      if (logits && logits.type === "int64" && logits.data.length === 1 && logits.data[0] === 0n) {
+        logits.data[0] = 1n;
+      }
+      return run.apply(this, arguments);
+    };
+    session.jaaLastTokenLogits = true;
+  });
+}
+
+function jaaLocalDisposeTensors(value) {
+  var seen = new Set();
+  function dispose(item) {
+    if (!item || typeof item !== "object" || seen.has(item)) return;
+    seen.add(item);
+    if (typeof item.dispose === "function" && item.dims) {
+      try { item.dispose(); } catch (error) { /* Preserve the original generation error after device loss. */ }
+    } else if (!ArrayBuffer.isView(item)) Object.values(item).forEach(dispose);
+  }
+  dispose(value);
+}
+
 function jaaLocalIsQwen3(modelId) {
   return /(?:^|[\/_-])qwen3(?:[\/_-]|$)/i.test(String(modelId || ""));
 }
@@ -148,7 +179,7 @@ function jaaLocalFriendlyError(value, modelId) {
   }
   if (/std::bad_alloc|out of memory|failed to allocate|allocation failed/i.test(detail)) {
     var name = jaaLocalIsDeepSeekR1Qwen(modelId) ? "DeepSeek R1 Qwen 1.5B" : "This model";
-    return name + " could not create an ONNX session in this browser. This can be a browser/export allocation limit even when the Mac has enough physical memory. Reload ApplyOnce and retry with WebGPU, or reduce the context window and output limit.";
+    return name + " exhausted the browser's available memory while loading or running inference. The failed worker was released. WebGPU is already being used; changing Chrome flags will not fix an allocation failure. The model and current input must fit in this device's memory.";
   }
   if (/table index is out of bounds/i.test(detail)) {
     var wasm = jaaLocalIsDeepSeekR1Qwen(modelId)
@@ -253,6 +284,8 @@ async function jaaGetLocalPipeline(modelId, dtype, onProgress) {
     }
   });
 
+  if (jaaLocalIsGemma4(modelId)) jaaLocalGuardGenerationLogits(generator.model);
+
   jaaLocalPipeline = { key: key, generator: generator };
   return generator;
 }
@@ -298,6 +331,9 @@ async function jaaGenerateLocalLlm(options) {
   if (options.signal) options.signal.throwIfAborted();
   var parameterSettings = jaaLocalParameterSettings(options.model, options.parameters);
   if (options.pageImages && options.pageImages.length) return jaaGenerateLocalVisualLlm(options, parameterSettings);
+  if (jaaLocalIsGemma4(options.model) && jaaLocalPipeline && jaaLocalPipeline.visual) {
+    return jaaGenerateLocalVisualLlm(Object.assign({}, options, { pageImages: [] }), parameterSettings);
+  }
   var generator = await jaaGetLocalPipeline(options.model, options.dtype || "q4", options.onProgress);
   if (options.onProgress) options.onProgress({ status: "ready" });
   if (options.signal) options.signal.throwIfAborted();
@@ -317,7 +353,7 @@ async function jaaGenerateLocalLlm(options) {
   });
 
   // The pipeline applies the model's own chat template to this message list.
-  var recentMessages = typeof jaaLlmLocalMessages === "function" ? jaaLlmLocalMessages(options.messages) : options.messages;
+  var recentMessages = !options.preserveContext && typeof jaaLlmLocalMessages === "function" ? jaaLlmLocalMessages(options.messages) : options.messages;
   var conversation = [{ role: "system", content: options.system }].concat(recentMessages);
   try {
     // Use the user's selected context budget; the model runtime reports unsupported sizes.
@@ -328,7 +364,7 @@ async function jaaGenerateLocalLlm(options) {
     if (limit <= 0) throw new Error("The context window must be larger than the output limit so the prompt has room.");
     if (generator.tokenizer && generator.tokenizer.apply_chat_template) {
       var countTokens = function () { return generator.tokenizer.apply_chat_template(conversation, Object.assign({ tokenize: true, add_generation_prompt: true }, generationOptions.tokenizer_encode_kwargs)).length; };
-      while (countTokens() > limit && conversation.length > 2) {
+      while (!options.preserveContext && countTokens() > limit && conversation.length > 2) {
         conversation.splice(1, 1);
         while (conversation.length > 2 && conversation[1].role !== "user") conversation.splice(1, 1);
       }
@@ -372,12 +408,13 @@ async function jaaGenerateLocalVisualLlm(options, settings) {
     var processor;
     try { processor = await module.AutoProcessor.from_pretrained(options.model); }
     catch (error) { await model.dispose(); throw error; }
+    jaaLocalGuardGenerationLogits(model);
     visual = { model: model, processor: processor };
     jaaLocalPipeline = { key: key, generator: { dispose: function () { return model.dispose(); } }, visual: visual };
   }
   if (options.onProgress) options.onProgress({ status: "ready" });
   if (options.signal) options.signal.throwIfAborted();
-  var recent = typeof jaaLlmLocalMessages === "function" ? jaaLlmLocalMessages(options.messages) : options.messages;
+  var recent = !options.preserveContext && typeof jaaLlmLocalMessages === "function" ? jaaLlmLocalMessages(options.messages) : options.messages;
   var question = recent.length && recent[recent.length - 1].role === "user" ? recent[recent.length - 1].content : "";
   if (!question) throw new Error("A user message is required with a page image.");
 
@@ -406,7 +443,9 @@ async function jaaGenerateLocalVisualLlm(options, settings) {
         generationOptions.max_new_tokens = Math.min(generationOptions.max_new_tokens, remaining);
         break;
       }
-      if (conversation.length <= 2) throw new Error("The page images and message exceed the selected context window. Increase it or turn off the page image.");
+      jaaLocalDisposeTensors(inputs);
+      inputs = null;
+      if (conversation.length <= 2 || options.preserveContext) throw new Error("The page images and message exceed the selected context window. Increase it or turn off the page image.");
       conversation.splice(1, 1);
       while (conversation.length > 2 && conversation[1].role !== "user") conversation.splice(1, 1);
     }
@@ -414,8 +453,9 @@ async function jaaGenerateLocalVisualLlm(options, settings) {
     var interrupt = function () { stopping.interrupt(); };
     if (options.signal) options.signal.addEventListener("abort", interrupt, { once: true });
     var text = "";
+    var generated;
     try {
-      await visual.model.generate(Object.assign({}, inputs, generationOptions, {
+      generated = await visual.model.generate(Object.assign({}, inputs, generationOptions, {
         streamer: new module.TextStreamer(visual.processor.tokenizer, {
           skip_prompt: true, skip_special_tokens: !stream,
           callback_function: function (delta) {
@@ -429,12 +469,16 @@ async function jaaGenerateLocalVisualLlm(options, settings) {
       return text.trim();
     } finally {
       if (options.signal) options.signal.removeEventListener("abort", interrupt);
+      jaaLocalDisposeTensors(inputs);
+      jaaLocalDisposeTensors(generated);
     }
   }
 
   // Keep only one image batch decoded at a time. Earlier batches are distilled
   // into rolling notes so a long page does not require one enormous model run.
-  var batchSize = 8;
+  // Vision activations grow with the image batch. Encode one screenshot at a
+  // time, including on iOS; this does not limit the number of page captures.
+  var batchSize = 1;
   var total = Math.ceil(options.pageImages.length / batchSize);
   var notes = "";
   var start = 0;
@@ -442,7 +486,7 @@ async function jaaGenerateLocalVisualLlm(options, settings) {
     if (options.onProgress) options.onProgress({ status: "visual", done: Math.floor(start / batchSize) + 1, total: total });
     notes = await runVisualTurn([
       { role: "system", content: "Read ordered webpage screenshots. Maintain concise notes of exact visible field labels, formats, validation hints, dates, and page facts relevant to the user's request. Preserve relevant earlier notes. Do not invent unseen details." },
-      { role: "user", content: "User request: " + question + "\nEarlier page notes: " + (notes || "none") + "\nUpdate the notes using these next screenshots." }
+      { role: "user", content: "User request: " + (options.visualQuestion || question) + "\nEarlier page notes: " + (notes || "none") + "\nUpdate the notes using this next screenshot." }
     ], options.pageImages.slice(start, start + batchSize), 384, false, false);
     if (!notes) throw new Error("Gemma 4 could not read one section of the page. Try a shorter page or larger context window.");
   }
@@ -503,6 +547,8 @@ function sendToLocalLlm(options) {
       model: options.model,
       dtype: options.dtype,
       parameters: options.parameters,
+      preserveContext: options.preserveContext,
+      visualQuestion: options.visualQuestion,
       system: options.system,
       messages: options.messages,
       pageImages: options.pageImages

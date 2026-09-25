@@ -6,9 +6,7 @@ toggle chips and only the enabled ones run, so the user can always see exactly
 what is about to be sent — which matters a lot once the destination is a
 third-party API rather than the local model.
 
-They are deliberately read-only, and shaped like function-call schemas so a
-provider that supports native tool calling can be wired to the same `run`
-implementations later without touching this file.
+They are deliberately read-only.
 */
 
 var JAA_LLM_TOOL_BUDGET = 6000; // default character budget for small local models
@@ -39,7 +37,7 @@ async function jaaLlmProfileContext() {
   return "Saved profile fields:\n" + jaaLlmTruncate(lines.join("\n"));
 }
 
-async function jaaLlmResumeContext() {
+async function jaaLlmResumeContext(options) {
   var state = await getState();
   var resumeKey = Object.keys(state.fields || {}).filter(function (key) {
     var field = state.fields[key];
@@ -52,7 +50,7 @@ async function jaaLlmResumeContext() {
   if (!record) return "A resume named " + (field.fileName || resumeKey) + " is referenced but its file is missing.";
 
   var header = "Resume file: " + record.name + " (" + record.type + ")";
-  return header + "\n\n" + await jaaLlmReadResume(record);
+  return header + "\n\n" + await jaaLlmReadResume(record, options);
 }
 
 async function jaaLlmApplicationsContext() {
@@ -169,195 +167,6 @@ var JAA_LLM_TOOLS = [
   }
 ];
 
-// Native function calling schemas for hosted providers.
-// These are translated to each provider's format by llm-providers.js.
-var JAA_LLM_AGENT_TOOLS = [
-  {
-    name: "inspect_form",
-    description: "Returns the current state of all form fields on the active web page, including labels, types, current values, saved profile values, required flags, and whether each field is empty or fillable.",
-    parameters: {
-      type: "object",
-      properties: {},
-      required: []
-    }
-  },
-  {
-    name: "get_page_text",
-    description: "Returns the visible text content of the active web page, useful for understanding job descriptions, application instructions, and page context.",
-    parameters: {
-      type: "object",
-      properties: {},
-      required: []
-    }
-  },
-  {
-    name: "get_validation_errors",
-    description: "Checks for HTML5 validation errors and visible error messages on the active page. Use after filling to detect problems.",
-    parameters: {
-      type: "object",
-      properties: {},
-      required: []
-    }
-  },
-  {
-    name: "set_fields",
-    description: "Set specific form field values on the active page. Use snake_case field names. Never set passwords, government IDs, or payment fields.",
-    parameters: {
-      type: "object",
-      properties: {
-        fields: {
-          type: "array",
-          description: "Array of field-value pairs to set",
-          items: {
-            type: "object",
-            properties: {
-              field: { type: "string", description: "Field name or ref in snake_case" },
-              value: { type: "string", description: "Value to set" }
-            },
-            required: ["field", "value"]
-          }
-        }
-      },
-      required: ["fields"]
-    }
-  },
-  {
-    name: "fill_form",
-    description: "Trigger bulk autofill of all empty mapped fields on the active page using saved profile values. Only fills blank fields, never overwrites user-typed values, never submits.",
-    parameters: {
-      type: "object",
-      properties: {},
-      required: []
-    }
-  },
-  {
-    name: "click_element",
-    description: "Click a button or link on the page by its visible text. Use for navigation buttons like Next, Continue, Save, or expanding sections. Never clicks submit, delete, or payment buttons.",
-    parameters: {
-      type: "object",
-      properties: {
-        text: { type: "string", description: "The visible text of the button or link to click" },
-        role: { type: "string", description: "Optional ARIA role filter (button, link, tab)" }
-      },
-      required: ["text"]
-    }
-  },
-  {
-    name: "scroll_to_element",
-    description: "Scroll a form field or element into view by its ref or selector.",
-    parameters: {
-      type: "object",
-      properties: {
-        ref: { type: "string", description: "The field ref to scroll to" }
-      },
-      required: ["ref"]
-    }
-  },
-  {
-    name: "get_profile",
-    description: "Returns the user's saved profile fields (name, email, phone, work experience, education, etc).",
-    parameters: {
-      type: "object",
-      properties: {},
-      required: []
-    }
-  },
-  {
-    name: "get_resume",
-    description: "Returns the text content of the user's attached resume file.",
-    parameters: {
-      type: "object",
-      properties: {},
-      required: []
-    }
-  },
-  {
-    name: "done",
-    description: "Signal that the agent has completed its task. Call this when all form filling is complete or when no more actions are needed.",
-    parameters: {
-      type: "object",
-      properties: {
-        summary: { type: "string", description: "A brief summary of what was accomplished" }
-      },
-      required: ["summary"]
-    }
-  }
-];
-
-// Execute a tool call from the agent loop. Returns a result string.
-async function jaaLlmExecuteToolCall(toolName, args, tabId) {
-  args = args || {};
-  switch (toolName) {
-    case "inspect_form":
-      var inspectResult = await jaaBrowser.tabs.sendMessage(tabId, { type: "JAA_AGENT_INSPECT_FORM" }, { frameId: 0 });
-      if (!inspectResult || !inspectResult.ok) return "Error: Could not inspect form. Reload the page and check site access.";
-      var fieldLines = inspectResult.fields.map(function (field) {
-        var status = field.current ? "filled: " + field.current.slice(0, 160) : "empty";
-        if (!field.current && field.saved) status += "; saved profile value available";
-        var flags = [];
-        if (field.required) flags.push("required");
-        if (field.fillable) flags.push("auto-fillable");
-        return "- " + field.label + " [ref=" + field.ref + "] (" + field.type + "): " + status + (flags.length ? " [" + flags.join(", ") + "]" : "");
-      });
-      return "Page: " + inspectResult.title + "\nURL: " + inspectResult.url + "\n\nForm fields (" + inspectResult.fields.length + "):\n" + fieldLines.join("\n");
-
-    case "get_page_text":
-      var textResult = await jaaBrowser.tabs.sendMessage(tabId, { type: "JAA_GET_PAGE_TEXT" }, { frameId: 0 });
-      if (!textResult || !textResult.text) return "Error: Could not read page text.";
-      return "Page: " + textResult.title + "\nURL: " + textResult.url + "\n\n" + textResult.text;
-
-    case "get_validation_errors":
-      var valResult = await jaaBrowser.tabs.sendMessage(tabId, { type: "JAA_AGENT_GET_VALIDATION" }, { frameId: 0 });
-      if (!valResult || !valResult.ok) return "Error: Could not check validation.";
-      if (!valResult.fieldErrors.length && !valResult.pageErrors.length) return "No validation errors found on the page.";
-      var valLines = [];
-      if (valResult.fieldErrors.length) {
-        valLines.push("Field validation errors:");
-        valResult.fieldErrors.forEach(function (err) {
-          valLines.push("- " + err.label + " [ref=" + err.ref + "]: " + err.message + (err.required ? " (required)" : ""));
-        });
-      }
-      if (valResult.pageErrors.length) {
-        valLines.push("Page error messages:");
-        valResult.pageErrors.forEach(function (err) { valLines.push("- " + err.text); });
-      }
-      return valLines.join("\n");
-
-    case "set_fields":
-      // This is a write tool — returns description for review, not direct execution.
-      return "WRITE_ACTION: set_fields requires review. Fields: " + JSON.stringify(args.fields || []);
-
-    case "fill_form":
-      // This is a write tool — returns description for review.
-      return "WRITE_ACTION: fill_form requires review before execution.";
-
-    case "click_element":
-      // This is a write tool — returns description for review.
-      return "WRITE_ACTION: click_element '" + (args.text || args.selector || "") + "' requires review.";
-
-    case "scroll_to_element":
-      var scrollResult = await jaaBrowser.tabs.sendMessage(tabId, { type: "JAA_AGENT_SCROLL_TO", ref: args.ref, selector: args.selector }, { frameId: 0 });
-      return scrollResult && scrollResult.ok ? "Scrolled to " + (args.ref || args.selector) : "Error: " + (scrollResult && scrollResult.error || "Element not found.");
-
-    case "get_profile":
-      return await jaaLlmProfileContext();
-
-    case "get_resume":
-      return await jaaLlmResumeContext();
-
-    case "done":
-      return "AGENT_DONE: " + (args.summary || "Task complete.");
-
-    default:
-      return "Error: Unknown tool '" + toolName + "'.";
-  }
-}
-
-// Classify a tool call as read-only or write (needs review).
-function jaaLlmIsWriteTool(toolName) {
-  return toolName === "set_fields" || toolName === "fill_form" || toolName === "click_element";
-}
-
 // Runs every enabled tool and folds the results into one system message.
 async function buildLlmContext(enabled, options) {
   var active = JAA_LLM_TOOLS.filter(function (tool) {
@@ -394,10 +203,7 @@ function jaaLlmSystemPrompt(context) {
 
 if (typeof window !== "undefined") {
   window.JAA_LLM_TOOLS = JAA_LLM_TOOLS;
-  window.JAA_LLM_AGENT_TOOLS = JAA_LLM_AGENT_TOOLS;
   window.buildLlmContext = buildLlmContext;
   window.jaaLlmContextBudget = jaaLlmContextBudget;
   window.jaaLlmSystemPrompt = jaaLlmSystemPrompt;
-  window.jaaLlmExecuteToolCall = jaaLlmExecuteToolCall;
-  window.jaaLlmIsWriteTool = jaaLlmIsWriteTool;
 }

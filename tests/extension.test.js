@@ -89,7 +89,7 @@ test("shared Safari and Chromium manifest uses portable settings", () => {
   assert.ok(manifest.permissions.includes("scripting"));
   assert.equal(manifest.background.service_worker, "background.js");
   assert.equal("persistent" in manifest.background, false);
-  assert.deepEqual(manifest.content_scripts[0].js, ["storage.js", "content.js"]);
+  assert.deepEqual(manifest.content_scripts[0].js, ["storage.js", "diagnostics.js", "page-policy.js", "page-tools.js", "content.js"]);
   assert.equal(manifest.content_scripts[0].all_frames, true);
   assert.equal(manifest.options_ui.page, "options.html");
   // The full editor is a wide, multi-column table, so it opens as its own
@@ -786,7 +786,7 @@ test('local model parameters preserve any positive context window without an art
   const deepSeek = 'onnx-community/DeepSeek-R1-Distill-Qwen-1.5B-ONNX';
   assert.equal(ctx.jaaLocalParameterDefaults(deepSeek).maxNewTokens, 512);
   assert.equal(ctx.jaaLocalParameterDefaults(deepSeek).doSample, false);
-  assert.match(ctx.jaaLocalFriendlyError("Can't create a session. ERROR_MESSAGE: std::bad_alloc", deepSeek), /browser\/export allocation limit/i);
+  assert.match(ctx.jaaLocalFriendlyError("Can't create a session. ERROR_MESSAGE: std::bad_alloc", deepSeek), /exhausted the browser's available memory/i);
   assert.equal(ctx.jaaLocalRevision(deepSeek), '61425627ba20650f3540d034589d35f00514ba7c');
 });
 
@@ -934,9 +934,9 @@ test('saved reasoning stays visible in history but is omitted from hosted model 
   assert.equal(history[0].reasoning, 'Private model reasoning');
 });
 
-test('all five provider adapters build requests and extract streamed responses', async () => {
-  for (const provider of ['openai', 'groq', 'deepseek', 'anthropic', 'gemini']) {
-    const ctx = loadLlmScript('llm-store.js');
+test('all hosted provider adapters build requests and extract streamed responses', async () => {
+  for (const provider of ['openai', 'groq', 'deepseek', 'anthropic', 'gemini', 'omniroute']) {
+    const ctx = loadLlmScript('llm-store.js', { URL });
     ctx.fetch = async (url, request) => {
       assert.ok(!url.includes('test-key'));
       const body = JSON.parse(request.body);
@@ -951,18 +951,20 @@ test('all five provider adapters build requests and extract streamed responses',
         return new Response('data: {"type":"content_block_delta","delta":{"text":"Hello world"}}\n\n');
       }
       assert.equal(request.headers.Authorization, 'Bearer test-key');
+      if (provider === 'omniroute') assert.equal(url, 'https://router.example/v1/chat/completions');
+      assert.equal(request.headers['X-CI-Route'], undefined);
       assert.equal(body.messages[0].role, 'system');
       return new Response('data: {"choices":[{"delta":{"content":"Hello world"}}]}\n\ndata: [DONE]\n\n');
     };
     vm.runInContext(fs.readFileSync(path.join(resourcesRoot, 'llm/llm-providers.js'), 'utf8'), ctx);
-    assert.equal(await ctx.sendToLlm({providerId:provider,model:'test',key:'test-key',system:'Help me',messages:[{role:'user',content:'Hi'}]}), 'Hello world');
+    assert.equal(await ctx.sendToLlm({providerId:provider,baseUrl:'https://router.example/v1',model:'test',key:'test-key',system:'Help me',messages:[{role:'user',content:'Hi'}]}), 'Hello world');
   }
 });
 
 test('all hosted adapters send the captured page image in their native request format', async () => {
   const image = 'data:image/jpeg;base64,QUJD';
-  for (const provider of ['openai', 'groq', 'deepseek', 'anthropic', 'gemini']) {
-    const ctx = loadLlmScript('llm-store.js');
+  for (const provider of ['openai', 'groq', 'deepseek', 'anthropic', 'gemini', 'omniroute']) {
+    const ctx = loadLlmScript('llm-store.js', { URL });
     ctx.fetch = async (url, request) => {
       const body = JSON.parse(request.body);
       if (provider === 'gemini') {
@@ -982,9 +984,70 @@ test('all hosted adapters send the captured page image in their native request f
     vm.runInContext(fs.readFileSync(path.join(resourcesRoot, 'llm/llm-providers.js'), 'utf8'), ctx);
     assert.equal(await ctx.sendToLlm({
       providerId:provider,model:'vision-model',key:'test-key',system:'Help',
+      baseUrl:'https://router.example/v1/',
       messages:[{role:'user',content:'Read the form'}],pageImages:[image]
     }), 'Seen');
   }
+});
+
+test('local OmniRoute defaults to model auto with no API key or service-specific header', async () => {
+  const ctx = loadLlmScript('llm-store.js', { URL });
+  vm.runInContext(fs.readFileSync(path.join(resourcesRoot, 'llm/llm-providers.js'), 'utf8'), ctx);
+  const provider = ctx.jaaLlmProvider('omniroute');
+  const settings = ctx.jaaLlmDefaults();
+  settings.provider = provider.id;
+  const model = ctx.jaaLlmActiveModel(settings);
+  assert.equal(model, 'auto');
+  ctx.fetch = async (url, request) => {
+    assert.equal(url, 'http://localhost:20128/v1/chat/completions');
+    assert.equal(request.headers.Authorization, undefined);
+    assert.equal(request.headers['X-CI-Route'], undefined);
+    const body = JSON.parse(request.body);
+    assert.equal(body.model, 'auto');
+    assert.equal(body.stream, true);
+    return new Response('data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n');
+  };
+  // Auto is the gateway's real model ID, including when UI selection is omitted.
+  for (const selection of [model, undefined]) {
+    assert.equal(await ctx.sendToLlm({ providerId: provider.id, model: selection,
+      system: 'Help', messages: [{ role: 'user', content: 'Hi' }] }), 'Hi');
+  }
+});
+
+test('switching from Cheaper Inference to OmniRoute never reuses its key, model or endpoint', async () => {
+  const ctx = loadLlmScript('llm-store.js', { jaaBrowser: { storage: { local: { get: async () => ({ jaaLLM: {
+    provider: 'omnirouter', apiModels: { omnirouter: 'account-model' }, keys: { omnirouter: 'test-key' },
+    apiBaseUrls: { omnirouter: 'https://router.example/v1' }
+  } }) } } } });
+  const settings = await ctx.getLlmSettings();
+  assert.equal(settings.provider, 'omniroute');
+  assert.equal(ctx.jaaLlmActiveModel(settings), 'auto');
+  assert.equal(settings.keys.omnirouter, 'test-key');
+  assert.equal(settings.keys.omniroute, undefined);
+  assert.equal(settings.apiBaseUrls.omnirouter, undefined);
+  assert.equal(ctx.jaaLlmProvider(settings.provider).defaultBaseUrl, 'http://localhost:20128/v1');
+});
+
+test('OmniRoute retains auto routing and vision content across image batches', async () => {
+  const ctx = loadLlmScript('llm-store.js', { URL });
+  vm.runInContext(fs.readFileSync(path.join(resourcesRoot, 'llm/llm-providers.js'), 'utf8'), ctx);
+  let calls = 0;
+  let seen = 0;
+  ctx.fetch = async (url, request) => {
+    calls++;
+    assert.equal(request.headers['X-CI-Route'], undefined);
+    assert.equal(request.headers.Authorization, 'Bearer endpoint-key');
+    const body = JSON.parse(request.body);
+    assert.equal(body.model, 'auto');
+    seen += body.messages.at(-1).content.filter(part => part.type === 'image_url').length;
+    return new Response('data: {"choices":[{"delta":{"content":"Page notes"}}]}\n\n');
+  };
+  const result = await ctx.sendToLlm({ providerId: 'omniroute', model: 'auto', key: 'endpoint-key',
+    system: 'Help', messages: [{ role: 'user', content: 'Read this page' }],
+    pageImages: Array(9).fill('data:image/jpeg;base64,QUJD') });
+  assert.equal(result, 'Page notes');
+  assert.equal(calls, 2);
+  assert.equal(seen, 9);
 });
 
 test('Groq image requests carry all page sections through bounded batches', async () => {
@@ -1007,23 +1070,6 @@ test('Groq image requests carry all page sections through bounded batches', asyn
   assert.equal(requests[0].messages[1].content.filter(part => part.type === 'image_url').length, 3);
   assert.equal(requests[1].messages[1].content.filter(part => part.type === 'image_url').length, 1);
   assert.match(requests[1].messages[1].content.at(-1).text, /Earlier fields use MM-YYYY/);
-});
-
-test('hosted agent follow-up keeps page images on its most recent user turn', async () => {
-  const ctx = loadLlmScript('llm-store.js');
-  ctx.fetch = async (url, request) => {
-    const body = JSON.parse(request.body);
-    assert.equal(body.messages[1].content[1].image_url.url, 'data:image/jpeg;base64,QUJD');
-    assert.equal(body.messages[2].role, 'tool');
-    return new Response('data: {"choices":[{"delta":{"content":"Seen"}}]}\n\n');
-  };
-  vm.runInContext(fs.readFileSync(path.join(resourcesRoot, 'llm/llm-providers.js'), 'utf8'), ctx);
-  const reply = await ctx.sendToLlmWithTools({
-    providerId:'openai',model:'gpt-4o',key:'test-key',system:'Help',
-    messages:[{role:'user',content:'Inspect page'}, {role:'tool',content:'Form fields',toolCallId:'call-1'}],
-    pageImages:['data:image/jpeg;base64,QUJD']
-  });
-  assert.equal(reply.text, 'Seen');
 });
 
 test('assistant settings migrate precision and discard invalid conversation entries', async () => {
@@ -1200,9 +1246,10 @@ test('Gemma page images use the multimodal processor and vision model', async ()
   });
   assert.equal(answer, 'Answer');
   assert.deepEqual(calls[0], ['model', modelId, 'q4f16']);
-  assert.deepEqual([calls[1][0], Array.from(calls[1][1]), calls[1][2]], ['template', ['image', 'image', 'text'], false]);
-  assert.deepEqual(calls[2], ['processed', 2]);
+  assert.deepEqual([calls[1][0], Array.from(calls[1][1]), calls[1][2]], ['template', ['image', 'text'], false]);
+  assert.deepEqual(calls[2], ['processed', 1]);
   assert.deepEqual(calls[3], ['generated', undefined, 212]);
+  assert.equal(calls.filter(call => call[0] === 'processed').length, 2);
 });
 
 test('Gemma processes a long page in ordered image batches', async () => {
@@ -1233,10 +1280,10 @@ test('Gemma processes a long page in ordered image batches', async () => {
     messages: [{role: 'user', content: 'Find the date format'}], pageImages,
     parameters: {contextWindow: 4096, maxNewTokens: 256}
   });
-  assert.equal(answer, 'Section 3');
-  assert.deepEqual(imageCounts, [8, 8, 2]);
+  assert.equal(answer, 'Section 18');
+  assert.deepEqual(imageCounts, Array(18).fill(1));
   assert.match(prompts[1], /Earlier page notes: Section 1/);
-  assert.match(prompts[2], /Notes from earlier sections.*Section 2/s);
+  assert.match(prompts[17], /Notes from earlier sections.*Section 17/s);
 });
 
 test('removing a local model preserves unrelated cached models', async () => {
@@ -1385,6 +1432,7 @@ test('agent profile updates preserve unrelated state and reject file replacement
 
 test('agent refuses to fill a page that navigated after review', async () => {
   const ctx = loadLlmScript('llm-agent.js', {
+    jaaRequirePageActions: async () => {},
     slugify:value=>value, normalizeLabel:value=>value, JAA_ACTIVITY_LOG_MAX:300,
     jaaBrowser:{tabs:{get:async()=>({url:'https://changed.example/'}),sendMessage:async()=>{throw new Error('must not fill');}}}
   });
@@ -1409,6 +1457,7 @@ test('approved field changes update profile and the matching open page', async (
   let state = {fields:{},activityLog:[]};
   const sent = [];
   const ctx = loadLlmScript('llm-agent.js', {
+    jaaRequirePageActions: async () => {},
     slugify:value=>value, normalizeLabel:value=>value, JAA_ACTIVITY_LOG_MAX:300,
     getState:async()=>structuredClone(state), setState:async value=>{state=structuredClone(value);},
     jaaBrowser:{tabs:{

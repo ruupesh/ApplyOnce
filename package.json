@@ -4,14 +4,24 @@
   "private": true,
   "description": "Shared Safari, Chrome, and Edge ApplyOnce WebExtension.",
   "scripts": {
-    "build:chromium": "node scripts/build-extension.js",
-    "package:chromium": "npm run build:chromium && cd dist/chromium && zip -qr ../ApplyOnce-chromium.zip .",
-    "test": "node --test tests/extension.test.js",
+    "build:agent": "node scripts/build-agent.js",
+    "build:chromium": "npm run build:agent && node scripts/build-extension.js",
+    "package:chromium": "node scripts/package-extension.js",
+    "test": "npm run build:agent && node --test tests/*.test.js",
     "vendor:llm": "node scripts/vendor-llm.js",
     "vendor:resume": "node scripts/vendor-resume.js",
     "vendor:llm:clean": "rm -rf 'ApplyOnce Extension/Resources/vendor/transformers'"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@langchain/core": "1.2.11",
+    "@langchain/langgraph": "1.4.15",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "jsdom": "26.1.0"
   }
 }

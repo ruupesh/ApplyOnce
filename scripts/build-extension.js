@@ -2,6 +2,8 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const { buildDiagnostics, loggerFlag } = require('./build-diagnostics');
+const loggers = loggerFlag(process.argv.slice(2));
 
 const root = path.resolve(__dirname, "..");
 const source = path.join(root, "ApplyOnce Extension", "Resources");
@@ -41,4 +43,7 @@ fs.cpSync(source, output, {
   }
 });
 
-console.log(`Chromium extension staged at ${path.relative(root, output)}`);
+// Always regenerate; a previous Safari debug build must not enable release logs.
+buildDiagnostics(path.join(output, 'diagnostics.js'), loggers).then(() => {
+  console.log(`Chromium extension staged at ${path.relative(root, output)} (loggers ${loggers ? 'on' : 'off'})`);
+}).catch(error => { console.error(error); process.exitCode = 1; });

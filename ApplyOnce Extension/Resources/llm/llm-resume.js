@@ -1,5 +1,6 @@
 /* Read resume text locally. No resume bytes are uploaded to parse a file. */
-async function jaaLlmReadResume(record) {
+async function jaaLlmReadResume(record, options) {
+  var complete = options && options.complete;
   var bytes = Uint8Array.from(atob(record.data || ""), function (c) { return c.charCodeAt(0); });
   if (/pdf/i.test(record.type || "") || /\.pdf$/i.test(record.name || "")) {
     var url = jaaBrowser.runtime.getURL("vendor/pdfjs/pdf.min.mjs");
@@ -11,20 +12,22 @@ async function jaaLlmReadResume(record) {
     var text = "";
     try {
       var pdf = await task.promise;
-      for (var i = 1; i <= Math.min(pdf.numPages, 20) && text.length < JAA_LLM_TOOL_BUDGET; i++) {
+      for (var i = 1; i <= (complete ? pdf.numPages : Math.min(pdf.numPages, 20)) && (complete || text.length < JAA_LLM_TOOL_BUDGET); i++) {
         var page = await pdf.getPage(i);
         var content = await page.getTextContent();
         text += content.items.map(function (item) { return (item.str || "") + (item.hasEOL ? "\n" : " "); }).join("") + "\n";
       }
       if (!text.trim()) throw new Error("This PDF contains no readable text. Scanned resumes need OCR; attach a text version.");
-      return jaaLlmTruncate(text);
+      return complete ? text : jaaLlmTruncate(text);
     } finally { await task.destroy(); }
   }
   if (/wordprocessingml/i.test(record.type || "") || /\.docx$/i.test(record.name || "")) {
-    return jaaLlmTruncate(await jaaLlmDocxText(bytes));
+    var text = await jaaLlmDocxText(bytes);
+    return complete ? text : jaaLlmTruncate(text);
   }
   if (/^text\/|json|markdown/i.test(record.type || "") || /\.(txt|md|csv)$/i.test(record.name || "")) {
-    return jaaLlmTruncate(new TextDecoder().decode(bytes));
+    var text = new TextDecoder().decode(bytes);
+    return complete ? text : jaaLlmTruncate(text);
   }
   throw new Error("Unsupported resume format. Use PDF, DOCX, or a text file.");
 }

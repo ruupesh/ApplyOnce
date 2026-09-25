@@ -10,10 +10,22 @@ var JAA_LLM_STORAGE_KEY = "jaaLLM";
 var JAA_LLM_MAX_MESSAGES = 80;
 var JAA_LLM_LOCAL_MESSAGE_BUDGET = 8000;
 
-// One entry per provider. `kind` picks the wire adapter, so the three
+// One entry per provider. `kind` picks the wire adapter, so the
 // OpenAI-compatible services share a single implementation.
 var JAA_LLM_PROVIDERS = [
   { id: "local", label: "On-device (no key)", kind: "local", needsKey: false },
+  {
+    id: "omniroute",
+    label: "OmniRoute (local server)",
+    kind: "openai",
+    needsKey: false,
+    optionalKey: true,
+    configurableBaseUrl: true,
+    defaultBaseUrl: "http://localhost:20128/v1",
+    defaultModel: "auto",
+    modelLabels: { auto: "Auto — let OmniRoute choose" },
+    models: ["auto", "auto/smart", "auto/fast", "auto/cheap", "auto/vision"]
+  },
   {
     id: "openai",
     label: "OpenAI",
@@ -78,6 +90,7 @@ function jaaLlmDefaults() {
     provider: "local",
     keys: {},
     apiModels: {},
+    apiBaseUrls: {},
     localModel: JAA_LLM_LOCAL_MODELS[0].id,
     localModelHistory: [],
     localDtype: "q4",
@@ -85,7 +98,7 @@ function jaaLlmDefaults() {
     context: { profile: true, resume: false, applications: false, page: false, pageImage: false },
     messages: [],
     agentMode: "auto",
-    maxAgentIterations: 10,
+    allowPageActions: false,
     autoApplyReads: true
   };
 }
@@ -102,11 +115,21 @@ async function getLlmSettings() {
   var res = await jaaBrowser.storage.local.get(JAA_LLM_STORAGE_KEY);
   var stored = res && res[JAA_LLM_STORAGE_KEY];
   var settings = jaaLlmDefaults();
+  var permission = await jaaBrowser.storage.local.get("jaaPageActionsAllowed");
+  settings.allowPageActions = !!permission && permission.jaaPageActionsAllowed === true;
   if (!stored || typeof stored !== "object") return settings;
 
   if (jaaLlmProvider(stored.provider).id === stored.provider) settings.provider = stored.provider;
+  // This replaces a different service. Do not reuse its credentials, endpoint
+  // or model IDs for the user's local gateway.
+  if (stored.provider === "omnirouter") settings.provider = "omniroute";
   if (stored.keys && typeof stored.keys === "object") settings.keys = stored.keys;
   if (stored.apiModels && typeof stored.apiModels === "object") settings.apiModels = stored.apiModels;
+  if (stored.apiBaseUrls && typeof stored.apiBaseUrls === "object") {
+    JAA_LLM_PROVIDERS.filter(function (provider) { return provider.configurableBaseUrl; }).forEach(function (provider) {
+      if (typeof stored.apiBaseUrls[provider.id] === "string") settings.apiBaseUrls[provider.id] = stored.apiBaseUrls[provider.id];
+    });
+  }
   if (jaaLlmIsListedLocalModel(stored.localModel)) settings.localModel = stored.localModel;
   if (Array.isArray(stored.localModelHistory)) {
     stored.localModelHistory.forEach(function (modelId) {
@@ -136,9 +159,6 @@ async function getLlmSettings() {
   }
   if (typeof stored.agentMode === "string" && ["auto", "always", "never"].indexOf(stored.agentMode) !== -1) {
     settings.agentMode = stored.agentMode;
-  }
-  if (typeof stored.maxAgentIterations === "number" && stored.maxAgentIterations >= 1 && stored.maxAgentIterations <= 20) {
-    settings.maxAgentIterations = Math.round(stored.maxAgentIterations);
   }
   if (typeof stored.autoApplyReads === "boolean") settings.autoApplyReads = stored.autoApplyReads;
   settings.messages = jaaLlmMessages(stored.messages);
@@ -199,7 +219,7 @@ async function setLlmSettings(settings) {
 function jaaLlmActiveModel(settings) {
   var provider = jaaLlmProvider(settings.provider);
   if (provider.kind === "local") return settings.localModel;
-  return settings.apiModels[provider.id] || (provider.models || [])[0] || "";
+  return settings.apiModels[provider.id] || provider.defaultModel || (provider.models || [])[0] || "";
 }
 
 // Whether a provider supports native tool/function calling.
@@ -212,9 +232,8 @@ function jaaLlmProviderSupportsTools(providerId) {
 function jaaLlmEffectiveAgentMode(settings) {
   if (settings.agentMode === "never") return "never";
   if (settings.agentMode === "always") return "always";
-  // "auto": enable for hosted providers, disable for local.
-  var provider = jaaLlmProvider(settings.provider);
-  return provider.kind === "local" ? "never" : "always";
+  // The deterministic workflow supports local models through validated JSON.
+  return "always";
 }
 
 if (typeof window !== "undefined") {

@@ -64,7 +64,7 @@
       Model
       <select id="llmModel"></select>
     </label>
-    <button id="llmKeysBtn" class="secondary">API keys</button>
+    <button id="llmKeysBtn" class="secondary">API keys / servers</button>
   </div>
 </header>
 
@@ -261,6 +261,11 @@
         <span class="llmAttachLabel">Attach</span>
         <div class="llmChips" id="llmChips"></div>
       </div>
+      <label class="llmSamplingToggle">
+        <input type="checkbox" id="llmAllowPageActions" aria-describedby="llmPageActionsHelp" />
+        Allow agent actions on pages
+      </label>
+      <p class="llmModelInfo" id="llmPageActionsHelp">Off by default. Enable to review and apply clicks, field edits, selections and scrolling. Reading page code works while off. Existing automatic profile autofill is controlled in Websites.</p>
       <div class="llmPageRow" id="llmPageRow" hidden>
         <label for="llmPageSelect">Page to inspect</label>
         <select id="llmPageSelect" aria-label="Page to attach"></select>
@@ -319,11 +324,17 @@
 </main>
 
 <script src="storage.js"></script>
+<script src="diagnostics.js"></script>
+<script src="page-policy.js"></script>
 <script src="options.js"></script>
 <script src="llm/llm-store.js"></script>
 <script src="llm/llm-resume.js"></script>
 <script src="llm/llm-tools.js"></script>
 <script src="llm/llm-agent.js"></script>
+<script src="llm/llm-agent-events.js"></script>
+<script src="llm/llm-agent-view.js"></script>
+<script src="llm/llm-page-tools.js"></script>
+<script src="llm/llm-workflow.js"></script>
 <script src="llm/llm-format.js"></script>
 <script src="llm/llm-local.js"></script>
 <script src="llm/llm-providers.js"></script>

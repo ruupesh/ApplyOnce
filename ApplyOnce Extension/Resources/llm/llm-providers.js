@@ -1,10 +1,9 @@
 /*
 Bring-your-own-key providers.
 
-All five services are HTTP + JSON, and OpenAI/Groq/DeepSeek speak the identical
-/chat/completions shape — so they share one adapter and only Claude and Gemini
-need their own. That is the whole reason there is no SDK or agent framework in
-here: this file is what LangChain would have cost several megabytes to provide.
+OpenAI, Groq, DeepSeek, and OmniRoute share the /chat/completions adapter.
+Claude and Gemini use their own wire formats. The form workflow uses these
+same transports, with LangGraph managing the application steps separately.
 
 Every adapter exposes the same call:
   send({ endpoint, key, model, system, messages, onDelta, signal }) -> Promise<string>
@@ -23,7 +22,10 @@ async function jaaLlmFailure(response) {
     });
   }
   var hint = response.status === 401 || response.status === 403 ? " Check your API key." : "";
-  return new Error("HTTP " + response.status + ": " + (detail || response.statusText) + hint);
+  var failure = new Error("HTTP " + response.status + ": " + (detail || response.statusText) + hint);
+  failure.code = 'HTTP_' + response.status;
+  if (typeof jaaDiagnostics !== 'undefined') jaaDiagnostics.log('provider_error', { code: failure.code, status: response.status });
+  return failure;
 }
 
 // Reads a text/event-stream body and hands each `data:` payload to `onEvent`.
@@ -61,7 +63,7 @@ async function jaaLlmReadSSE(response, onEvent) {
   }
 }
 
-async function jaaLlmStream(request, extractDelta, onDelta) {
+async function jaaLlmStream(request, extractDelta, onDelta, observeEvent) {
   var response = await fetch(request.url, {
     method: "POST",
     headers: request.headers,
@@ -72,91 +74,13 @@ async function jaaLlmStream(request, extractDelta, onDelta) {
 
   var text = "";
   await jaaLlmReadSSE(response, function (event) {
+    if (observeEvent) observeEvent(event);
     var delta = extractDelta(event);
     if (!delta) return;
     text += delta;
     if (onDelta) onDelta(delta);
   });
   return text;
-}
-
-// Enhanced streaming that handles both text and tool calls.
-// extractDelta returns objects: { text }, { toolCalls }, { toolCallStart }, { toolCallInputDelta },
-// { toolCallStop }, { geminiFunctionCalls }, { finish }, or null.
-async function jaaLlmStreamWithTools(request, extractDelta, onDelta) {
-  var response = await fetch(request.url, {
-    method: "POST",
-    headers: request.headers,
-    body: JSON.stringify(request.body),
-    signal: request.signal
-  });
-  if (!response.ok || !response.body) throw await jaaLlmFailure(response);
-
-  var text = "";
-  var toolCalls = [];
-  // For OpenAI-style incremental tool call assembly.
-  var pendingToolCalls = {};
-  // For Anthropic-style tool use assembly.
-  var currentAnthropicTool = null;
-  var anthropicToolInput = "";
-
-  await jaaLlmReadSSE(response, function (event) {
-    var delta = extractDelta(event);
-    if (!delta) return;
-
-    // Plain text.
-    if (delta.text) {
-      text += delta.text;
-      if (onDelta) onDelta(delta.text);
-    }
-
-    // OpenAI-style tool call deltas (incremental).
-    if (delta.toolCalls) {
-      delta.toolCalls.forEach(function (tc) {
-        var index = tc.index != null ? tc.index : 0;
-        if (!pendingToolCalls[index]) {
-          pendingToolCalls[index] = { id: tc.id || "", name: "", arguments: "" };
-        }
-        var pending = pendingToolCalls[index];
-        if (tc.id) pending.id = tc.id;
-        if (tc["function"] && tc["function"].name) pending.name = tc["function"].name;
-        if (tc["function"] && tc["function"]["arguments"]) pending["arguments"] += tc["function"]["arguments"];
-      });
-    }
-
-    // Anthropic-style tool use.
-    if (delta.toolCallStart) {
-      currentAnthropicTool = { id: delta.toolCallStart.id, name: delta.toolCallStart.name };
-      anthropicToolInput = "";
-    }
-    if (delta.toolCallInputDelta) {
-      anthropicToolInput += delta.toolCallInputDelta;
-    }
-    if (delta.toolCallStop && currentAnthropicTool) {
-      var args = {};
-      try { args = JSON.parse(anthropicToolInput || "{}"); } catch (e) {}
-      toolCalls.push({ id: currentAnthropicTool.id, name: currentAnthropicTool.name, args: args });
-      currentAnthropicTool = null;
-      anthropicToolInput = "";
-    }
-
-    // Gemini-style function calls (complete in one event).
-    if (delta.geminiFunctionCalls) {
-      delta.geminiFunctionCalls.forEach(function (fc) {
-        toolCalls.push({ id: "gemini-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8), name: fc.name, args: fc.args || {} });
-      });
-    }
-  });
-
-  // Finalize OpenAI-style pending tool calls.
-  Object.keys(pendingToolCalls).forEach(function (index) {
-    var pending = pendingToolCalls[index];
-    var args = {};
-    try { args = JSON.parse(pending["arguments"] || "{}"); } catch (e) {}
-    toolCalls.push({ id: pending.id, name: pending.name, args: args });
-  });
-
-  return { text: text, toolCalls: toolCalls };
 }
 
 // ---------- adapters ----------
@@ -193,39 +117,33 @@ function jaaLlmSendOpenAI(options) {
     stream: true,
     messages: [{ role: "system", content: options.system }].concat(jaaLlmImageMessages(options.messages, options.pageImages, "openai"))
   };
-  // Native function calling when tools are provided.
-  if (options.tools && options.tools.length) {
-    body.tools = options.tools.map(function (tool) {
-      return { type: "function", "function": { name: tool.name, description: tool.description, parameters: tool.parameters } };
-    });
-    body.tool_choice = "auto";
-  }
-  return jaaLlmStreamWithTools(
+  var headers = { "Content-Type": "application/json" };
+  if (options.key) headers.Authorization = "Bearer " + options.key;
+  return jaaLlmStream(
     {
       url: options.endpoint,
       signal: options.signal,
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: "Bearer " + options.key
-      },
+      headers: headers,
       body: body
     },
     function (event) {
       var choice = event.choices && event.choices[0];
       if (!choice) return null;
-      // Text delta.
-      if (choice.delta && choice.delta.content) return { text: choice.delta.content };
-      // Tool call delta.
-      if (choice.delta && choice.delta.tool_calls) {
-        return { toolCalls: choice.delta.tool_calls };
-      }
-      // Finish reason.
-      if (choice.finish_reason === "tool_calls" || choice.finish_reason === "stop") {
-        return { finish: choice.finish_reason };
-      }
-      return null;
+      return choice && choice.delta && choice.delta.content || "";
     },
-    options.onDelta
+    options.onDelta,
+    function (event) {
+      var choice = event.choices && event.choices[0];
+      var delta = choice && choice.delta || {};
+      var reasoning = delta.reasoning_content || delta.reasoning;
+      if (typeof reasoning === 'string' && options.onReasoningDelta) options.onReasoningDelta(reasoning);
+      if (options.onResponseMetadata && (event.model || choice && choice.finish_reason)) {
+        var metadata = {};
+        if (event.model) metadata.model = event.model;
+        if (choice && choice.finish_reason) metadata.finishReason = choice.finish_reason;
+        options.onResponseMetadata(metadata);
+      }
+    }
   );
 }
 
@@ -237,13 +155,7 @@ function jaaLlmSendAnthropic(options) {
     system: options.system,
     messages: jaaLlmImageMessages(options.messages, options.pageImages, "anthropic")
   };
-  if (options.tools && options.tools.length) {
-    body.tools = options.tools.map(function (tool) {
-      return { name: tool.name, description: tool.description, input_schema: tool.parameters };
-    });
-    body.tool_choice = { type: "auto" };
-  }
-  return jaaLlmStreamWithTools(
+  return jaaLlmStream(
     {
       url: options.endpoint,
       signal: options.signal,
@@ -256,29 +168,17 @@ function jaaLlmSendAnthropic(options) {
       body: body
     },
     function (event) {
-      // Text delta.
       if (event.type === "content_block_delta" && event.delta && event.delta.text) {
-        return { text: event.delta.text };
+        return event.delta.text;
       }
-      // Tool use start — capture tool name and id.
-      if (event.type === "content_block_start" && event.content_block && event.content_block.type === "tool_use") {
-        return { toolCallStart: { id: event.content_block.id, name: event.content_block.name } };
-      }
-      // Tool use input delta (partial JSON).
-      if (event.type === "content_block_delta" && event.delta && event.delta.type === "input_json_delta") {
-        return { toolCallInputDelta: event.delta.partial_json || "" };
-      }
-      // Content block stop.
-      if (event.type === "content_block_stop") {
-        return { toolCallStop: true };
-      }
-      // Message stop.
-      if (event.type === "message_stop") {
-        return { finish: "stop" };
-      }
-      return null;
+      return "";
     },
-    options.onDelta
+    options.onDelta,
+    function (event) {
+      if (event.delta && event.delta.type === 'thinking_delta' && typeof event.delta.thinking === 'string' && options.onReasoningDelta) options.onReasoningDelta(event.delta.thinking);
+      if (options.onResponseMetadata && event.message && event.message.model) options.onResponseMetadata({ model: event.message.model });
+      if (options.onResponseMetadata && event.delta && event.delta.stop_reason) options.onResponseMetadata({ finishReason: event.delta.stop_reason });
+    }
   );
 }
 
@@ -301,14 +201,7 @@ function jaaLlmSendGemini(options) {
       };
     })
   };
-  if (options.tools && options.tools.length) {
-    body.tools = [{
-      functionDeclarations: options.tools.map(function (tool) {
-        return { name: tool.name, description: tool.description, parameters: tool.parameters };
-      })
-    }];
-  }
-  return jaaLlmStreamWithTools(
+  return jaaLlmStream(
     {
       url:
         options.endpoint +
@@ -323,20 +216,15 @@ function jaaLlmSendGemini(options) {
       var candidate = event.candidates && event.candidates[0];
       var parts = candidate && candidate.content && candidate.content.parts || [];
       var textParts = parts.filter(function (part) { return !part.thought && part.text; });
-      var funcParts = parts.filter(function (part) { return part.functionCall; });
-      if (funcParts.length) {
-        return {
-          geminiFunctionCalls: funcParts.map(function (part) {
-            return { name: part.functionCall.name, args: part.functionCall.args || {} };
-          })
-        };
-      }
-      if (textParts.length) {
-        return { text: textParts.map(function (part) { return part.text || ""; }).join("") };
-      }
-      return null;
+      return textParts.map(function (part) { return part.text || ""; }).join("");
     },
-    options.onDelta
+    options.onDelta,
+    function (event) {
+      var candidate = event.candidates && event.candidates[0];
+      var parts = candidate && candidate.content && candidate.content.parts || [];
+      parts.forEach(function (part) { if (part.thought && typeof part.text === 'string' && options.onReasoningDelta) options.onReasoningDelta(part.text); });
+      if (options.onResponseMetadata && candidate && candidate.finishReason) options.onResponseMetadata({ finishReason: candidate.finishReason });
+    }
   );
 }
 
@@ -347,12 +235,8 @@ var JAA_LLM_ADAPTERS = {
 };
 
 function jaaLlmWireMessages(messages) {
-  return messages.map(function (message) {
-    if (!Object.prototype.hasOwnProperty.call(message, "reasoning")) return message;
-    var clean = Object.assign({}, message);
-    delete clean.reasoning;
-    return clean;
-  });
+  // UI activity and provider reasoning must never be re-sent as conversation.
+  return messages.map(function (message) { return { role: message.role, content: message.content }; });
 }
 
 function jaaLlmImageBatchEnd(images, start, providerId) {
@@ -371,13 +255,17 @@ function jaaLlmImageBatchEnd(images, start, providerId) {
 }
 
 async function jaaLlmSendHosted(provider, options) {
+  var selectedModel = String(options.model || provider.defaultModel || "").trim();
+  if (!selectedModel) throw new Error("Choose a " + provider.label + " model first.");
   var adapter = JAA_LLM_ADAPTERS[provider.kind];
   var messages = jaaLlmWireMessages(options.messages);
   var images = options.pageImages || [];
   var base = {
-    endpoint: provider.endpoint, key: options.key, model: options.model,
-    system: options.system, messages: messages, tools: options.tools,
-    onDelta: options.onDelta, signal: options.signal
+    endpoint: jaaLlmProviderEndpoint(provider, options.baseUrl), key: options.key,
+    model: selectedModel,
+    system: options.system, messages: messages,
+    onDelta: options.onDelta, onReasoningDelta: options.onReasoningDelta,
+    onResponseMetadata: options.onResponseMetadata, signal: options.signal
   };
   if (!images.length) return adapter(base);
 
@@ -397,9 +285,9 @@ async function jaaLlmSendHosted(provider, options) {
     var summary = await adapter(Object.assign({}, base, {
       system: "Read ordered webpage screenshots. Maintain concise notes of exact visible field labels, formats, validation hints, dates, and page facts relevant to the user's request. Preserve relevant earlier notes. Do not invent unseen details.",
       messages: [{ role: "user", content: "User request: " + question + "\nEarlier page notes: " + (notes || "none") + "\nThese screenshots are page sections " + (start + 1) + " through " + end + " of " + images.length + ". Update the notes using them." }],
-      pageImages: images.slice(start, end), tools: undefined, onDelta: undefined
+      pageImages: images.slice(start, end), onDelta: undefined, onReasoningDelta: undefined, onResponseMetadata: undefined
     }));
-    notes = String(summary.text || "").trim();
+    notes = String(summary || "").trim();
     if (!notes) throw new Error("The provider could not read one section of the page.");
     start = end;
   }
@@ -412,43 +300,63 @@ async function jaaLlmSendHosted(provider, options) {
   return adapter(Object.assign({}, base, { messages: finalMessages, pageImages: images.slice(start) }));
 }
 
+function jaaLlmProviderBaseUrl(provider, baseUrl) {
+  var value = String(baseUrl || provider.defaultBaseUrl || "").trim();
+  if (!value) throw new Error("Add your " + provider.label + " API base URL in API keys / servers first.");
+  var url;
+  try { url = new URL(value); } catch (error) { throw new Error("Enter a valid " + provider.label + " API base URL."); }
+  if (!/^https?:$/.test(url.protocol) || url.username || url.password || url.search || url.hash) {
+    throw new Error("Use an HTTP or HTTPS server URL without credentials, query or fragment. Put the key in the API key field.");
+  }
+  var path = url.pathname.replace(/\/+$/, "").replace(/\/chat\/completions$/, "");
+  url.pathname = path || "/v1";
+  return url.href;
+}
+
+function jaaLlmProviderEndpoint(provider, baseUrl) {
+  if (!provider.configurableBaseUrl) return provider.endpoint;
+  return jaaLlmProviderBaseUrl(provider, baseUrl) + "/chat/completions";
+}
+
+// A read-only connection check; does not run inference or send attachments.
+async function jaaLlmListModels(options) {
+  var provider = jaaLlmProvider(options.providerId);
+  if (!provider.configurableBaseUrl) throw new Error("This provider does not expose a configurable model catalog.");
+  var url = jaaLlmProviderBaseUrl(provider, options.baseUrl) + "/models";
+  var headers = {};
+  if (options.key) headers.Authorization = "Bearer " + options.key;
+  var controller = new AbortController();
+  var timeout = setTimeout(function () { controller.abort(); }, 15000);
+  try {
+    var response = await fetch(url, { headers: headers, signal: controller.signal, redirect: "error" });
+    if (!response.ok) throw await jaaLlmFailure(response);
+    var body = await response.json();
+    if (!body || !Array.isArray(body.data)) throw new Error("The server did not return an OpenAI-compatible model list. Check the API base URL.");
+    return Array.from(new Set(body.data.filter(function (model) {
+      return model && typeof model.id === "string" && model.id.trim();
+    }).map(function (model) { return model.id; })));
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error("OmniRoute did not respond within 15 seconds. Check that the server is running and reachable.");
+    if (error instanceof TypeError) throw new Error("Could not reach OmniRoute. Check the server URL, that it is running, and browser network/site access. On iPhone, use your Mac's network address instead of localhost.");
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 // Single entry point the chat UI calls, whichever provider is selected.
-// Returns a string (backward compatible, no tool calls).
+// Returns a string.
 function sendToLlm(options) {
   var provider = jaaLlmProvider(options.providerId);
   if (provider.kind === "local") return sendToLocalLlm(options);
 
   var adapter = JAA_LLM_ADAPTERS[provider.kind];
   if (!adapter) return Promise.reject(new Error("Unsupported provider: " + provider.id));
-  if (!options.key) return Promise.reject(new Error("Add your " + provider.label + " API key first."));
-
-  // When called without tools, return text-only for backward compatibility.
-  return jaaLlmSendHosted(provider, options).then(function (result) {
-    // Adapters now return { text, toolCalls }; extract text for compat.
-    return typeof result === "string" ? result : result.text;
-  });
-}
-
-// Entry point for the agentic loop. Returns { text, toolCalls } with native
-// tool calling for hosted providers and XML fallback for local models.
-function sendToLlmWithTools(options) {
-  var provider = jaaLlmProvider(options.providerId);
-
-  // Local models don't support native tool calling; use text-only path.
-  if (provider.kind === "local") {
-    return sendToLocalLlm(options).then(function (text) {
-      return { text: text, toolCalls: [] };
-    });
-  }
-
-  var adapter = JAA_LLM_ADAPTERS[provider.kind];
-  if (!adapter) return Promise.reject(new Error("Unsupported provider: " + provider.id));
-  if (!options.key) return Promise.reject(new Error("Add your " + provider.label + " API key first."));
+  if (provider.needsKey && !options.key) return Promise.reject(new Error("Add your " + provider.label + " API key first."));
 
   return jaaLlmSendHosted(provider, options);
 }
 
 if (typeof window !== "undefined") {
   window.sendToLlm = sendToLlm;
-  window.sendToLlmWithTools = sendToLlmWithTools;
 }

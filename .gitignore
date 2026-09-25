@@ -4,7 +4,7 @@
 # Xcode user data and build products
 DerivedData/
 build/
-# dist/
+/dist/
 xcuserdata/
 *.xcuserstate
 *.xccheckout
@@ -18,4 +18,6 @@ LocalData/
 
 # Opt-in Transformers.js runtime (npm run vendor:llm)
 ApplyOnce Extension/Resources/vendor/
-dist/chromium/vendor/
+!ApplyOnce Extension/Resources/vendor/
+ApplyOnce Extension/Resources/vendor/*
+!ApplyOnce Extension/Resources/vendor/agent/

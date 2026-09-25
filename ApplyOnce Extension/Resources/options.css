@@ -9,6 +9,7 @@
 }
 
 html {
+  color-scheme: light;
   height: 100%;
 }
 
@@ -900,6 +901,15 @@ textarea.valueInput {
 .llmReasoning summary { cursor: pointer; padding: 7px 10px; font-weight: 600; }
 .llmReasoningText { padding: 0 10px 9px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow-y: auto; }
 
+.llmAgentActivity, .llmAgentStream { margin-top: 10px; padding: 10px 12px; border: 1px solid #d7dce5; border-radius: 8px; }
+.llmAgentActivity summary, .llmAgentStream summary { cursor: pointer; font-weight: 600; }
+.llmAgentEvents { margin: 10px 0 0; padding-left: 22px; max-height: 220px; overflow-y: auto; overflow-wrap: anywhere; }
+.llmAgentEvents li { margin: 5px 0; }
+.llmAgentEvents .isError { color: #ad2525; }
+.llmAgentStatus { margin: 8px 0; }
+.llmAgentElapsed, .llmAgentStreamNote, .llmAgentStreamLabel { font-size: 12px; color: #626b79; }
+.llmAgentStreamText { margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow-y: auto; font-size: 13px; }
+
 .llmMsg.user .llmText {
   white-space: pre-wrap;
   background: #eef2ff;
@@ -1052,4 +1062,15 @@ textarea.valueInput {
     flex-shrink: 0;
   }
   .tabs { overflow-x: auto; max-width: 100%; }
+}
+
+/* Use the same readable controls in Safari dark system appearance and Chrome. */
+input:not([type="checkbox"]):not([type="radio"]), textarea, select {
+  color: #1f2937;
+  background-color: #fff;
+  caret-color: #1f2937;
+}
+input::placeholder, textarea::placeholder {
+  color: #6b7280;
+  opacity: 1;
 }

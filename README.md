@@ -23,7 +23,7 @@ The Swift handler is available only to Safari for optional native messaging. The
 - `tests/` contains dependency-free manifest and JavaScript regression tests.
 - `scripts/build-extension.js` stages the shared resources for Chrome and Edge.
 
-The project uses Xcode file-system-synchronized groups. Add runtime web files directly to `ApplyOnce Extension/Resources`; Xcode includes them in the Safari extension target.
+The project uses Xcode file-system-synchronized groups. Add runtime web files directly to `ApplyOnce Extension/Resources`; Xcode includes them in the Safari extension target. The `llm/` and `vendor/` directories must remain explicit folder resources: flattening them breaks script URLs and leaves Assistant controls empty.
 
 ## Run on iPhone or iPad
 
@@ -58,7 +58,7 @@ xcrun safari-web-extension-converter --macos-only \
   "ApplyOnce Extension/Resources"
 ```
 
-Leave resource copying disabled in the converter prompts. Configure signing for the generated app and extension targets, run the macOS app, and enable ApplyOnce under **Safari → Settings → Extensions**.
+Regenerate older macOS wrappers after adding new top-level resource files; the converter records those files at generation time. Keep `llm/` and `vendor/` as folder references. Leave resource copying disabled in the converter prompts. Configure signing for the generated app and extension targets, run the macOS app, and enable ApplyOnce under **Safari → Settings → Extensions**.
 
 ## Privacy
 
@@ -68,7 +68,9 @@ Keep real exported profiles and resumes in the ignored `LocalData/` directory, n
 
 ## Assistant
 
-Open the full editor's **Assistant** tab. Choose an on-device model or add an OpenAI, Groq, DeepSeek, Claude, or Gemini API key. Models download only when you send the first message. Expand **Model parameters** to set a per-model context window up to 65,536 tokens, an output limit up to 16,384 tokens, sampling mode, temperature, top-p, top-k, and repetition penalty, or restore that model's defaults. The runtime also respects the selected model's architectural context limit. **Stop** cancels local loading/generation; **Remove selected model download** frees its cached files. Smaller models can be repetitive or inaccurate; review drafts before using them.
+Open the full editor's **Assistant** tab. Choose an on-device model, an OpenAI/Groq/DeepSeek/Claude/Gemini API, or **OmniRoute (local server)**. For OmniRoute, start your server separately and enter its address under **API keys / servers** (default `http://localhost:20128/v1`), plus an endpoint key if required. **Auto** lets the server choose a model; **Test connection / Load models** loads its available models and combos without sending a prompt. On iPhone, use your Mac's reachable network address instead of localhost. See [OmniRoute setup](docs/agent-workflow.md#local-omniroute-server).
+
+On-device models download only when you send the first message. Expand **Model parameters** to set a per-model context window, output limit, sampling mode, temperature, top-p, top-k, and repetition penalty, or restore that model's defaults. **Max** uses the selected model's published limits; actual generation depends on prompt length and device memory. **Stop** cancels local loading/generation; **Remove selected model download** frees its cached files. Smaller models can be repetitive or inaccurate; review drafts before using them.
 
 **Clear chat** sits directly above the conversation and can stop an in-progress reply before clearing. **Undo clear** restores the previous conversation while that editor remains open. Clearing does not remove profile fields, API keys, or model downloads. Reload any editor tabs left open during a rebuild so they run the updated code.
 
@@ -91,7 +93,13 @@ npm run vendor:resume
 npm run build:chromium
 ```
 
-Reload ApplyOnce in `chrome://extensions` after rebuilding. The vendored GPU + CPU runtime adds about 35.4 MiB; the PDF reader adds about 1.8 MB. Both vendor directories are gitignored. Use `npm run vendor:llm -- --cpu` for a smaller CPU-only runtime. A build without the runtime still supports API-key providers. API adapters use native `fetch` without an SDK or LangChain dependency.
+Reload ApplyOnce in `chrome://extensions` after rebuilding. The vendored GPU + CPU runtime adds about 35.4 MiB; the PDF reader adds about 1.8 MB. Both vendor directories are gitignored. Use `npm run vendor:llm -- --cpu` for a smaller CPU-only runtime. A build without the runtime still supports API-key providers. API adapters use native `fetch`; form orchestration uses a bundled LangGraph workflow.
+
+The form agent targets Safari 26+ and runs locally with the selected on-device model. It inspects the current page, proposes field changes, pauses for review, then reads back the applied values and checks validation. `Resume task` restores an interrupted task from extension-local storage. Page edits do not overwrite profile facts. See [the agent workflow](docs/agent-workflow.md) for architecture, build instructions, and scope.
+
+The agent also searches elements by role, text or CSS and reads paginated HTML, CSS and JavaScript source. Use **Inspect page code** or a request such as `[agent] Find the Show details button`. Enable **Allow agent actions on pages** in Assistant to review and apply clicks, edits, selections and scrolling; this switch defaults to off and also gates assistant form edits. Reads work while off. Automatic profile autofill remains controlled by Websites settings. The tools share the Safari macOS/iOS and Chromium codebase, use bundled DOM handlers, and do not execute model-generated JavaScript. See the workflow documentation for source-access and frame limitations.
+
+Agent activity and provider output stream while a task runs. The counter shows model calls, including retries, without a default ten-call cutoff. Permission errors and repeated failures stop with a specific explanation; unchanged read loops are detected, and Stop remains available. For developer console diagnostics, build with `npm run build:chromium -- --loggers` or `npm run build:agent -- --loggers` for Safari. Normal builds/packages turn loggers off. Before a Safari release, run `npm run build:agent` without the flag, then build in Xcode. See [diagnostics and call limits](docs/agent-workflow.md#live-activity-model-call-limits-and-diagnostics).
 
 ## Validation
 
@@ -118,3 +126,12 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 ## WebExtensions API compatibility
 
 `storage.js` selects Safari's `browser` namespace when present and falls back to Chromium's compatible `chrome` namespace. The authoritative cross-browser manifest is in `ApplyOnce Extension/Resources`, with a non-persistent service worker and portable PNG icons.
+
+
+To check Assistant initialization against a built Safari bundle (not just source files):
+
+```sh
+JAA_TEST_EXTENSION_ROOT="/path/to/ApplyOnce Extension.appex" node --test tests/safari-assistant.test.js
+```
+
+For a macOS bundle, point to its `Contents/Resources` directory. This checks actual packaged script paths and exercises providers, API-key controls, attachment chips and page selection with both WebExtension namespaces in a DOM test. It does not replace visual testing on Safari devices. Rebuild/reinstall Safari and reopen its options page after resource-packaging changes; reloading a webpage alone cannot fix an old app bundle.

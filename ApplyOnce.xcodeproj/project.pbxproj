@@ -73,6 +73,8 @@
 			explicitFolders = (
 				Resources/_locales,
 				Resources/images,
+				Resources/llm,
+				Resources/vendor,
 			);
 			path = "ApplyOnce Extension";
 			sourceTree = "<group>";
