@@ -5,20 +5,28 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>ApplyOnce — Field Editor</title>
 <link rel="stylesheet" href="options.css" />
+<link rel="stylesheet" href="editor.css" />
 </head>
 <body>
-<header>
-  <h1>ApplyOnce</h1>
-  <nav class="tabs">
+<aside class="sidebar">
+  <div class="brand"><img src="images/icon-48.png" width="28" height="28" alt="" /><span>ApplyOnce<small>Workspace</small></span></div>
+  <nav class="tabs" aria-label="Workspace">
     <button class="tabBtn active" data-tab="fields">Fields</button>
     <button class="tabBtn" data-tab="applications">Applications</button>
     <button class="tabBtn" data-tab="activity">Activity Log</button>
     <button class="tabBtn" data-tab="sites">Sites</button>
     <button class="tabBtn" data-tab="assistant">Assistant</button>
   </nav>
+  <label class="toggle">
+    <input type="checkbox" id="enabledToggle" role="switch" />
+    <span>Extension enabled</span>
+  </label>
+</aside>
+<header class="editorHeader">
+  <div class="titleRow"><div class="sectionTitle"><h1 id="sectionTitle">Fields</h1><span id="fieldCount" class="fieldCount"></span></div><span id="saveStatus" role="status" aria-live="polite" data-state="saved">Saved</span></div>
   <div class="toolbar" id="fieldsToolbar">
     <input id="search" type="search" aria-label="Search fields" placeholder="Search fields..." />
-    <button id="addFieldBtn">+ Add Field</button>
+    <button id="addFieldBtn">Add Field</button>
     <label class="fileBtn">
       Add Resume
       <input
@@ -33,10 +41,6 @@
       Import JSON
       <input id="importInput" type="file" accept="application/json" hidden />
     </label>
-    <label class="toggle">
-      <input type="checkbox" id="enabledToggle" />
-      Extension enabled
-    </label>
   </div>
   <div class="toolbar" id="applicationsToolbar" hidden>
     <input
@@ -49,11 +53,11 @@
     <button id="exportApplicationsBtn" class="secondary">Export CSV</button>
   </div>
   <div class="toolbar" id="activityToolbar" hidden>
-    <span class="activityHint">What the extension has filled, saved, and recorded — newest first.</span>
+    <span class="activityHint">Recent events</span>
     <button id="clearLogBtn" class="secondary">Clear Log</button>
   </div>
   <div class="toolbar" id="sitesToolbar" hidden>
-    <span class="activityHint">Choose where ApplyOnce is allowed to fill forms.</span>
+    <span class="activityHint">Website permissions</span>
   </div>
   <div class="toolbar" id="assistantToolbar" hidden>
     <label class="inlineField">
@@ -77,8 +81,7 @@
             <th class="colKey">Key</th>
             <th class="colValue">Value</th>
             <th class="colType">Type</th>
-            <th class="colPath">Path</th>
-            <th class="colAliases">Aliases (comma-separated label variants)</th>
+            <th class="colDetails">Details</th>
             <th class="colUpdated">Updated</th>
             <th class="colDelete"></th>
           </tr>
@@ -111,9 +114,7 @@
       </table>
     </div>
     <p id="applicationsEmptyState" class="empty" hidden>
-      No applications tracked yet. When you finish an application, click the
-      ApplyOnce toolbar button and choose "Log this application" — the company,
-      title, link, and time fill themselves in.
+      No applications tracked yet.
     </p>
   </section>
 
@@ -133,8 +134,7 @@
       </table>
     </div>
     <p id="activityEmptyState" class="empty" hidden>
-      No activity yet. Fill out a job application with the extension enabled
-      and it'll show up here as it happens.
+      No activity yet.
     </p>
   </section>
 
@@ -290,16 +290,7 @@
       <p id="llmChatStatus" class="llmModelInfo" role="status" hidden></p>
       <div class="llmTranscript" id="llmTranscript" role="log" aria-label="Conversation" aria-live="polite">
         <div class="llmEmpty" id="llmEmpty">
-          <h2>Ask about your applications</h2>
-          <p>
-            Draft an answer to an application question, tailor it to a company,
-            shorten it to fit a limit, or write a follow-up email — grounded in
-            the profile and applications you have already saved.
-          </p>
-          <p class="llmEmptyHint">
-            Pick <strong>On-device</strong> to download a small model that runs
-            entirely on your machine, or add an API key for a hosted model.
-          </p>
+          <h2>No conversation yet</h2>
         </div>
       </div>
 
@@ -326,6 +317,7 @@
 <script src="storage.js"></script>
 <script src="diagnostics.js"></script>
 <script src="page-policy.js"></script>
+<script src="editor-icons.js"></script>
 <script src="options.js"></script>
 <script src="llm/llm-store.js"></script>
 <script src="llm/llm-resume.js"></script>

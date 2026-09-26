@@ -9,6 +9,51 @@ var applicationsBody = document.getElementById("applicationsBody");
 var applicationsEmptyState = document.getElementById("applicationsEmptyState");
 var applicationSearch = document.getElementById("applicationSearch");
 var applicationCount = document.getElementById("applicationCount");
+var expandedFields = new Set();
+var pendingEditorSaves = 0;
+var deferredEditorRender = false;
+
+document.addEventListener("input", function (event) {
+  if (event.target.matches("#fieldsBody input, #fieldsBody textarea, #applicationsBody input, #applicationsBody textarea")) {
+    event.target.dataset.dirty = "true";
+    showEditorSaveStatus("unsaved", "Unsaved changes");
+  }
+});
+document.addEventListener("change", function (event) {
+  delete event.target.dataset.dirty;
+}, true);
+document.addEventListener("focusout", function () {
+  setTimeout(function () {
+    if (deferredEditorRender && !document.activeElement.closest("#fieldsBody, #applicationsBody")) {
+      deferredEditorRender = false;
+      renderFields();
+      renderApplications();
+    }
+  }, 0);
+});
+
+function showEditorSaveStatus(status, message) {
+  var indicator = document.getElementById("saveStatus");
+  indicator.dataset.state = status;
+  indicator.textContent = message;
+}
+
+async function saveEditorState(value) {
+  pendingEditorSaves++;
+  showEditorSaveStatus("saving", "Saving...");
+  try {
+    await setState(value);
+    pendingEditorSaves--;
+    if (!pendingEditorSaves) {
+      var dirty = document.querySelector('[data-dirty="true"]');
+      showEditorSaveStatus(dirty ? "unsaved" : "saved", dirty ? "Unsaved changes" : "Saved");
+    }
+  } catch (error) {
+    pendingEditorSaves--;
+    showEditorSaveStatus("error", "Could not save");
+    throw error;
+  }
+}
 
 init();
 
@@ -17,7 +62,7 @@ async function init() {
   enabledToggle.checked = state.enabled !== false;
   enabledToggle.addEventListener("change", async function () {
     state.enabled = enabledToggle.checked;
-    await setState(state);
+    await saveEditorState(state);
   });
 
   document.getElementById("addFieldBtn").addEventListener("click", addField);
@@ -53,10 +98,15 @@ async function init() {
   jaaBrowser.storage.onChanged.addListener(function (changes, area) {
     if (area !== "local" || !changes[JAA_STORAGE_KEY]) return;
     state = changes[JAA_STORAGE_KEY].newValue || jaaDefaultState();
-    renderFields();
+    enabledToggle.checked = state.enabled !== false;
+    if (document.activeElement.closest("#fieldsBody, #applicationsBody")) {
+      deferredEditorRender = true;
+    } else {
+      renderFields();
+      renderApplications();
+    }
     renderActivity();
     renderSites();
-    renderApplications();
   });
 
   renderFields();
@@ -75,9 +125,18 @@ function tabFromHash() {
 // buttons keeps this from growing a line per tab, and tolerating missing nodes
 // means an optional feature (the Assistant) can be deleted without editing it.
 function switchTab(tab) {
+  document.getElementById("fieldCount").hidden = tab !== "fields";
+  document.getElementById("saveStatus").hidden = tab === "assistant" || tab === "activity";
   Array.prototype.forEach.call(document.querySelectorAll(".tabBtn"), function (btn) {
     var name = btn.dataset.tab;
     btn.classList.toggle("active", name === tab);
+    if (name === tab) {
+      document.getElementById("sectionTitle").textContent = btn.textContent;
+      document.title = "ApplyOnce - " + btn.textContent;
+      btn.setAttribute("aria-current", "page");
+    } else {
+      btn.removeAttribute("aria-current");
+    }
     ["Section", "Toolbar"].forEach(function (suffix) {
       var el = document.getElementById(name + suffix);
       if (el) el.hidden = name !== tab;
@@ -133,7 +192,7 @@ async function updateApplication(id, apply) {
   if (!entry) return;
   apply(entry);
   entry.updatedAt = Date.now();
-  await setState(state);
+  await saveEditorState(state);
 }
 
 function buildApplicationRow(entry) {
@@ -142,6 +201,7 @@ function buildApplicationRow(entry) {
   var companyTd = document.createElement("td");
   var companyInput = document.createElement("input");
   companyInput.className = "keyInput";
+  companyInput.setAttribute("aria-label", "Company");
   companyInput.value = entry.company || "";
   companyInput.addEventListener("change", function () {
     updateApplication(entry.id, function (item) {
@@ -153,6 +213,7 @@ function buildApplicationRow(entry) {
   var titleTd = document.createElement("td");
   var titleInput = document.createElement("input");
   titleInput.className = "keyInput";
+  titleInput.setAttribute("aria-label", "Job title");
   titleInput.value = entry.title || "";
   titleInput.addEventListener("change", function () {
     updateApplication(entry.id, function (item) {
@@ -165,6 +226,7 @@ function buildApplicationRow(entry) {
   var status = jaaCanonicalStatus(entry.status);
   var statusSelect = document.createElement("select");
   statusSelect.className = "statusSelect " + jaaStatusClass(status);
+  statusSelect.setAttribute("aria-label", "Application status");
   jaaApplicationStatusOptions(state).forEach(function (value) {
     var option = document.createElement("option");
     option.value = value;
@@ -210,6 +272,7 @@ function buildApplicationRow(entry) {
   var notesTd = document.createElement("td");
   var notesInput = document.createElement("textarea");
   notesInput.className = "valueInput";
+  notesInput.setAttribute("aria-label", "Application notes");
   notesInput.rows = 1;
   notesInput.value = entry.notes || "";
   notesInput.addEventListener("change", function () {
@@ -237,13 +300,14 @@ function buildApplicationRow(entry) {
   var deleteBtn = document.createElement("button");
   deleteBtn.className = "deleteBtn";
   deleteBtn.textContent = "Delete";
+  decorateEditorControl(deleteBtn, "trash", "Delete application", true);
   deleteBtn.addEventListener("click", async function () {
     var name = [entry.company, entry.title].filter(Boolean).join(" — ") || "this application";
     if (!confirm("Delete " + name + "?")) return;
     state.applications = (state.applications || []).filter(function (item) {
       return item.id !== entry.id;
     });
-    await setState(state);
+    await saveEditorState(state);
     renderApplications();
   });
   deleteTd.appendChild(deleteBtn);
@@ -333,6 +397,7 @@ function renderSiteList(listId, emptyId, key) {
     remove.type = "button";
     remove.className = "siteRemove";
     remove.textContent = "Remove";
+    decorateEditorControl(remove, "close", "Remove " + host, true);
     remove.addEventListener("click", function () {
       updateSiteList(key, host, false);
     });
@@ -361,13 +426,13 @@ async function updateSiteList(key, host, add) {
   });
   if (add) list.push(h);
   state[key] = list;
-  await setState(state);
+  await saveEditorState(state);
   renderSites();
 }
 
 async function onSiteModeChange(event) {
   state.siteMode = event.target.value === "allowlist" ? "allowlist" : "all";
-  await setState(state);
+  await saveEditorState(state);
   renderSites();
 }
 
@@ -390,7 +455,11 @@ function renderFields() {
   });
 
   tbody.innerHTML = "";
-  emptyState.hidden = entries.length !== 0;
+  emptyState.hidden = filtered.length !== 0;
+  emptyState.textContent = entries.length ? "No matching fields." : "No fields saved yet.";
+  document.getElementById("fieldCount").textContent = q
+    ? filtered.length + " / " + entries.length
+    : entries.length + (entries.length === 1 ? " field" : " fields");
   filtered.forEach(function (entry) {
     tbody.appendChild(buildRow(entry[0], entry[1]));
   });
@@ -402,8 +471,18 @@ function buildRow(key, field) {
   var keyTd = document.createElement("td");
   var keyInput = document.createElement("input");
   keyInput.className = "keyInput";
+  keyInput.setAttribute("aria-label", "Field key: " + key);
   keyInput.value = key;
+  keyInput.addEventListener("input", function () { keyInput.setCustomValidity(""); });
   keyInput.addEventListener("change", function () {
+    var candidate = slugify(keyInput.value) || key;
+    if (candidate !== key && state.fields[candidate]) {
+      keyInput.setCustomValidity("A field with that key already exists.");
+      keyInput.dataset.dirty = "true";
+      keyInput.reportValidity();
+      showEditorSaveStatus("unsaved", "Unsaved changes");
+      return;
+    }
     renameKey(key, keyInput.value);
   });
   keyTd.appendChild(keyInput);
@@ -414,12 +493,13 @@ function buildRow(key, field) {
   } else {
     var valInput = document.createElement("textarea");
     valInput.className = "valueInput";
+    valInput.setAttribute("aria-label", "Value for " + key);
     valInput.value = field.value || "";
     valInput.rows = 1;
     valInput.addEventListener("change", async function () {
       state.fields[key].value = valInput.value;
       state.fields[key].updatedAt = Date.now();
-      await setState(state);
+      await saveEditorState(state);
     });
     valTd.appendChild(valInput);
   }
@@ -427,6 +507,7 @@ function buildRow(key, field) {
   var typeTd = document.createElement("td");
   var typeSelect = document.createElement("select");
   typeSelect.className = "typeSelect";
+  typeSelect.setAttribute("aria-label", "Type for " + key);
   [
     "text",
     "textarea",
@@ -467,7 +548,7 @@ function buildRow(key, field) {
     }
     state.fields[key].type = nextType;
     state.fields[key].updatedAt = Date.now();
-    await setState(state);
+    await saveEditorState(state);
     renderFields();
   });
   typeTd.appendChild(typeSelect);
@@ -495,7 +576,7 @@ function buildRow(key, field) {
     clearBtn.title = "Forget these recorded clicks — the next time you pick this field by hand, a fresh path is recorded.";
     clearBtn.addEventListener("click", async function () {
       delete state.fields[key].recordedPath;
-      await setState(state);
+      await saveEditorState(state);
       renderFields();
     });
     wrap.appendChild(clearBtn);
@@ -507,9 +588,9 @@ function buildRow(key, field) {
     pathTd.appendChild(dash);
   }
 
-  var aliasTd = document.createElement("td");
   var aliasInput = document.createElement("input");
   aliasInput.className = "aliasInput";
+  aliasInput.setAttribute("aria-label", "Aliases for " + key);
   aliasInput.value = (field.aliases || []).join(", ");
   aliasInput.addEventListener("change", async function () {
     state.fields[key].aliases = aliasInput.value
@@ -518,9 +599,8 @@ function buildRow(key, field) {
         return s.trim();
       })
       .filter(Boolean);
-    await setState(state);
+    await saveEditorState(state);
   });
-  aliasTd.appendChild(aliasInput);
 
   var updTd = document.createElement("td");
   updTd.textContent = field.updatedAt ? new Date(field.updatedAt).toLocaleDateString() : "-";
@@ -529,11 +609,12 @@ function buildRow(key, field) {
   var delBtn = document.createElement("button");
   delBtn.textContent = "Delete";
   delBtn.className = "deleteBtn";
+  decorateEditorControl(delBtn, "trash", "Delete field " + key, true);
   delBtn.addEventListener("click", async function () {
     if (!confirm('Delete field "' + key + '"?')) return;
     await removeStoredFile(key);
     delete state.fields[key];
-    await setState(state);
+    await saveEditorState(state);
     renderFields();
   });
   delTd.appendChild(delBtn);
@@ -541,8 +622,29 @@ function buildRow(key, field) {
   tr.appendChild(keyTd);
   tr.appendChild(valTd);
   tr.appendChild(typeTd);
-  tr.appendChild(pathTd);
-  tr.appendChild(aliasTd);
+  var detailsTd = document.createElement("td");
+  var details = document.createElement("details");
+  details.className = "fieldDetails";
+  details.open = expandedFields.has(key);
+  var summary = document.createElement("summary");
+  summary.textContent = "Details";
+  summary.setAttribute("aria-label", "Details for " + key);
+  details.appendChild(summary);
+  var aliasLabel = document.createElement("label");
+  aliasLabel.textContent = "Aliases";
+  aliasLabel.appendChild(aliasInput);
+  details.appendChild(aliasLabel);
+  var pathLabel = document.createElement("div");
+  pathLabel.className = "detailLabel";
+  pathLabel.textContent = "Recorded path";
+  details.appendChild(pathLabel);
+  while (pathTd.firstChild) details.appendChild(pathTd.firstChild);
+  details.addEventListener("toggle", function () {
+    if (details.open) expandedFields.add(key);
+    else expandedFields.delete(key);
+  });
+  detailsTd.appendChild(details);
+  tr.appendChild(detailsTd);
   tr.appendChild(updTd);
   tr.appendChild(delTd);
   return tr;
@@ -565,6 +667,14 @@ function buildFileValueEditor(key, field) {
     input.value = "";
   });
   picker.appendChild(input);
+  picker.tabIndex = 0;
+  picker.setAttribute("role", "button");
+  picker.addEventListener("keydown", function (event) {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      input.click();
+    }
+  });
 
   var name = document.createElement("span");
   name.className = "storedFileName";
@@ -647,7 +757,7 @@ async function saveFileForField(key, file, configureField) {
     field.fileMime = fileRecord.type;
     field.updatedAt = Date.now();
     await setStoredFile(key, fileRecord);
-    await setState(state);
+    await saveEditorState(state);
     renderFields();
   } catch (error) {
     alert(String(error?.message || error));
@@ -663,7 +773,7 @@ async function removeFileFromField(key) {
   delete field.fileSize;
   delete field.fileMime;
   field.updatedAt = Date.now();
-  await setState(state);
+  await saveEditorState(state);
   renderFields();
 }
 
@@ -725,15 +835,22 @@ async function renameKey(oldKey, newKeyRaw) {
   state.fields[newKey] = state.fields[oldKey];
   delete state.fields[oldKey];
   await renameStoredFile(oldKey, newKey);
-  await setState(state);
+  await saveEditorState(state);
   renderFields();
 }
 
 async function addField() {
+  searchInput.value = "";
   var key = uniqueKey(state, "new_field");
   state.fields[key] = { value: "", aliases: [], type: "text", createdAt: Date.now(), updatedAt: Date.now() };
-  await setState(state);
+  await saveEditorState(state);
   renderFields();
+  Array.from(tbody.querySelectorAll(".keyInput")).some(function (input) {
+    if (input.value !== key) return false;
+    input.focus();
+    input.select();
+    return true;
+  });
 }
 
 function exportJSON() {
@@ -780,7 +897,7 @@ async function importJSON(e) {
     if (!Array.isArray(state.blockedSites)) state.blockedSites = [];
     if (!Array.isArray(state.applications)) state.applications = [];
   }
-  await setState(state);
+  await saveEditorState(state);
   enabledToggle.checked = state.enabled !== false;
   renderFields();
   renderActivity();
@@ -845,6 +962,6 @@ function buildActivityRow(entry) {
 async function clearLog() {
   if (!confirm("Clear the activity log? This does not affect any saved field values.")) return;
   state.activityLog = [];
-  await setState(state);
+  await saveEditorState(state);
   renderActivity();
 }
